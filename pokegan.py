@@ -6,7 +6,7 @@ plaidml.keras.install_backend()
 
 from keras.models import Sequential
 from keras.layers import Dense, Activation, Flatten, Reshape
-from keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, SeparableConv2D
+from keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, SeparableConv2D, MaxPool2D
 from keras.layers import LeakyReLU, Dropout, ReLU
 from keras.layers import BatchNormalization
 from keras.layers import Softmax
@@ -21,6 +21,8 @@ import random,math
 import matplotlib.pyplot as plot
 import PIL
 
+from scipy import ndimage
+
 EPOCHS = 5000
 
 METRICS=[keras.metrics.categorical_accuracy]
@@ -31,16 +33,16 @@ METRICS=[keras.metrics.categorical_accuracy]
 
 train_datagen = ImageDataGenerator(
         rescale=1./255,
-        #width_shift=10,
-        #height_shift=10,
-        #fill_mode='constant',
-        #cval=255,
+        width_shift_range=5,
+        height_shift_range=5,
+        fill_mode='constant',
+        cval=255,
         horizontal_flip=True)
 
 train_generator = train_datagen.flow_from_directory(
         './dir_per_class',
         target_size=(96, 96),
-        batch_size=36,
+        batch_size=16,
         class_mode='binary')
 
 num_classes = train_generator.num_classes + 1 # pokemon + fake
@@ -50,13 +52,19 @@ num_classes = train_generator.num_classes + 1 # pokemon + fake
 ####
 
 
-def d_block(model, separables = 128, pointwise = 64, stride=2):
-    model.add(SeparableConv2D(separables, 3, strides=stride, padding='same', kernel_initializer='glorot_normal'))
+def d_block(model, separables = 128, depth_multiplier=1, stride=1, maxpool=True):
+    model.add(SeparableConv2D(separables, 3, strides=stride,
+                              depth_multiplier=depth_multiplier,
+                              padding='same',
+                              depthwise_initializer='glorot_normal',
+                              pointwise_initializer='glorot_normal'))
     model.add(BatchNormalization())
     model.add(LeakyReLU())
-    model.add(Conv2D(pointwise,1,kernel_initializer='glorot_normal'))
-    model.add(BatchNormalization())
-    model.add(LeakyReLU())
+    if maxpool:
+        model.add(MaxPool2D(padding='same'))
+    #model.add(Conv2D(pointwise,1,kernel_initializer='glorot_normal'))
+    #model.add(BatchNormalization())
+    #model.add(LeakyReLU())
 
 def Discriminator():
     discrim = Sequential()
@@ -64,15 +72,15 @@ def Discriminator():
     discrim.add(BatchNormalization())
     discrim.add(LeakyReLU())
 
-    d_block(discrim, 128, 64)
+    d_block(discrim, 128, 1)
 
-    d_block(discrim, 256, 128)
+    d_block(discrim, 256, 1)
 
-    d_block(discrim, 512, 256, 2)
-    d_block(discrim, 512, 256, 2)
+    d_block(discrim, 512, 1)
+    d_block(discrim, 512, 1)
     #d_block(discrim, 512, 256, 2)
-    d_block(discrim, 512, 256, 2)
-    d_block(discrim, 512, 512, 2)
+    d_block(discrim, 512, maxpool=False)
+    d_block(discrim, 512, maxpool=False)
 
     discrim.add(Flatten())
 
@@ -93,27 +101,31 @@ discrim = Discriminator()
 
 discrim.summary()
 
-discrim.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=METRICS)
+discrim.compile(optimizer=Adam(lr = 0.002), loss='categorical_crossentropy', metrics=METRICS)
 
 ###
 # G E N E R A T O R
 ###
 
-def g_block(model, stride=2):
-    model.add(Conv2DTranspose(32, 3, padding='same', strides=stride))
+def g_block(model, depth=32, stride=2, size=3):
+    model.add(Conv2DTranspose(32, size, padding='same', strides=stride))
     model.add(BatchNormalization())
-    model.add(ReLU())
+    model.add(LeakyReLU())
     
 
 def Generator():
     gen = keras.Sequential()
-    gen.add(Dense(12*12*64, input_shape=(100+653,)))
-    gen.add(Reshape(target_shape=(12,12,64)))
+    gen.add(Dense(6*6*256, input_shape=(100+num_classes,)))
+    gen.add(Reshape(target_shape=(6,6,256)))
     gen.add(ReLU())
-    for i in range(3):
-        g_block(gen)
-    g_block(gen,1)
-    gen.add(Conv2D(3, 1, activation='sigmoid'))
+    g_block(gen, 256)
+    g_block(gen, 128)
+    g_block(gen, 64)
+    g_block(gen, 32)
+    g_block(gen, depth=32, size=5, stride=1)
+    g_block(gen, depth=16, stride=1)
+    g_block(gen, depth=8, stride=1)
+    gen.add(Conv2DTranspose(3, 1, activation='sigmoid'))
     gen.summary()
     return gen
 
@@ -125,7 +137,7 @@ def gen_input(_class=0):
     return np.concatenate((keras.utils.to_categorical(_class, num_classes=num_classes), noise))
 
 def gen_input_rand():
-    return gen_input(random.randint(0, num_classes-1))
+    return gen_input(random.randint(0, num_classes-2))
 
 def gen_input_batch():
     return np.array([gen_input_rand() for x in range(train_generator.batch_size)])
@@ -191,6 +203,7 @@ for epoch in range(1,EPOCHS+1):
         print("a_loss %f, %s %f @ %d/%d" % (a_loss[0], adver.metrics_names[1], a_loss[1], batch_num, batches))
     #train_generator.reset()
     sample(epoch)
-    gen.save('gen-weights-%d.hdf5' % (epoch,))
-    discrim.save('discrim-weights-%d.hdf5' % (epoch,))
+    if epoch % 5 == 0:
+        gen.save('gen-weights-%d.hdf5' % (epoch,))
+        discrim.save('discrim-weights-%d.hdf5' % (epoch,))
     
