@@ -1,8 +1,8 @@
 import numpy as np
 import time
 
-import plaidml.keras
-plaidml.keras.install_backend()
+#import plaidml.keras
+#plaidml.keras.install_backend()
 
 from keras.models import Sequential
 from keras.layers import Dense, Activation, Flatten, Reshape
@@ -115,16 +115,16 @@ def g_block(model, depth=32, stride=2, size=3):
 
 def Generator():
     gen = keras.Sequential()
-    gen.add(Dense(6*6*256, input_shape=(100+num_classes,)))
-    gen.add(Reshape(target_shape=(6,6,256)))
-    gen.add(ReLU())
-    g_block(gen, 256)
-    g_block(gen, 128)
-    g_block(gen, 64)
-    g_block(gen, 32)
-    g_block(gen, depth=32, size=5, stride=1)
-    g_block(gen, depth=16, stride=1)
-    g_block(gen, depth=8, stride=1)
+    gen.add(Dense(6*6*256*3, input_shape=(100+num_classes,)))
+    gen.add(Reshape(target_shape=(6,6,256*3)))
+    gen.add(BatchNormalization())
+    g_block(gen, 256*3)
+    g_block(gen, 128*3)
+    g_block(gen, 64*3)
+    g_block(gen, 32*3)
+    g_block(gen, depth=32*3, size=5, stride=1)
+    g_block(gen, depth=32*3, stride=1)
+    g_block(gen, depth=32*3, stride=1)
     gen.add(Conv2DTranspose(3, 1, activation='sigmoid'))
     gen.summary()
     return gen
@@ -132,14 +132,22 @@ def Generator():
 gen = Generator()
 gen.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=METRICS)
 
-def gen_input(_class=0):
-    noise = np.random.uniform(-1.0, 1.0, 100)
-    return np.concatenate((keras.utils.to_categorical(_class, num_classes=num_classes), noise))
+# _class is one-hot category array
+# randomized if None
+def gen_input(_class=None):
+    noise = np.random.uniform(-2.0, 2.0, 100).clip(-1.0,1.0) # partially saturated noise to encourage features to be fully on or off?
+    if type(_class) == type(None):
+        _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes) * random.uniform(0.9,1.0)
+    return np.concatenate((_class, noise))
 
 def gen_input_rand():
-    return gen_input(random.randint(0, num_classes-2))
+    return gen_input()
 
-def gen_input_batch():
+# optionally receives one-hot class array from training loop
+def gen_input_batch(classes=None):
+    if type(classes) != type(None):
+        return np.array([gen_input(cls) for cls in classes])
+    print("!!! Generating random batch in gen_input_batch()!")
     return np.array([gen_input_rand() for x in range(train_generator.batch_size)])
         
 def sample(filenum=0):
@@ -162,7 +170,7 @@ def sample(filenum=0):
     plot.savefig('out%d.png' %(filenum,))
         
 
-#sample()
+#sample(666)
 #exit()
 
 ###
@@ -187,20 +195,27 @@ batches = math.floor(train_generator.n / train_generator.batch_size)
 for epoch in range(1,EPOCHS+1):
     print("--- epoch %d ---" % (epoch,))
     for batch_num in range(batches):
-        # get fake data
-        x = gen.predict(gen_input_batch())
-        y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) for dummy in x])
         # get real data
-        real_x,real_y = train_generator.next()
-        real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) for cls in real_y])
-        x = np.concatenate((x, real_x))
-        y = np.concatenate((y, real_y))
-        d_loss = discrim.train_on_batch(x, y)        
-        print("d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
-        x = gen_input_batch()
-        y = np.array([inp[:num_classes] for inp in x])
-        a_loss = adver.train_on_batch(x, y)
-        print("a_loss %f, %s %f @ %d/%d" % (a_loss[0], adver.metrics_names[1], a_loss[1], batch_num, batches))
+        x,y = train_generator.next()
+        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * random.uniform(0.9, 1.0) for cls in y]) # sparse to one-hot with noising
+        d_loss = discrim.train_on_batch(x, y)
+        print("REAL: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
+        
+        # get fake data
+        x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
+        x = gen.predict(x_gen_input)
+        y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) for dummy in x])
+        d_loss = discrim.train_on_batch(x, y)         
+        print("FAKE: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
+        
+        #x = gen_input_batch() 
+        #y = np.array([inp[:num_classes] for inp in x])
+        a_loss = adver.train_on_batch(x_gen_input, real_y)
+        print("ADVR: a_loss %f, %s %f " % (a_loss[0], adver.metrics_names[1], a_loss[1]))
+        x_gen_input = gen_input_batch(real_y) # same classes, different noise
+        a_loss = adver.train_on_batch(x_gen_input, real_y)
+        print("ADVR: a_loss %f, %s %f @ %d/%d\n" % (a_loss[0], adver.metrics_names[1], a_loss[1], batch_num, batches))
+        
     #train_generator.reset()
     sample(epoch)
     if epoch % 5 == 0:
