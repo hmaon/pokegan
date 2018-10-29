@@ -273,14 +273,16 @@ def render(all_out, filenum=0):
         #plots[i].get_yaxis().set_visible(False)
         #plots[i].set_xlabel(str(i+1))
 
-    plot.savefig('out%d.png' %(filenum,))
+    plot.savefig('out%d.png' %(filenum,), dpi=400)
     
 def sample(filenum=0):
     all_out = []
-    _class=1
+    classes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
+    print(len(classes))
+    _classidx=1
     for i in range(16):
-        inp = gen_input_batch([keras.utils.to_categorical(x, num_classes=num_classes) for x in range(_class,_class+4)])
-        _class+=4
+        inp = gen_input_batch([keras.utils.to_categorical(classes[x], num_classes=num_classes) for x in range(_classidx,_classidx+4)])
+        _classidx+=4
         print(inp.shape)
         batch_out = gen.predict(inp)
         print(batch_out.shape)
