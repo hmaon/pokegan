@@ -57,15 +57,19 @@ for i in range(len(sys.argv)):
 ### D A T A S E T
 ###
 
+def rangeshift(inp):
+    inp = (inp * -1) + 127
+    #print(inp)
+    return inp
+
 train_datagen = ImageDataGenerator(
-        rescale=1./127,
+        rescale=1./255,
         width_shift_range=3,
         height_shift_range=3,
         fill_mode='nearest',
         cval=255,
         horizontal_flip=False,
-        data_format='channels_first',
-        preprocessing_function = lambda img : img - 127)
+        data_format='channels_first')
 
 train_generator = train_datagen.flow_from_directory(
         './dir_per_class',
@@ -275,7 +279,7 @@ def render(all_out, filenum=0):
     for i in range(len(all_out)):
         out = all_out[i]
         out = out.reshape(3, 64, 64)
-        out = np.uint8(out * 127 + 127)
+        out = np.uint8(out * 255)
         out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
         #print("check this: ")
         #print(out.shape)
