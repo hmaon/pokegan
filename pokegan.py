@@ -106,13 +106,13 @@ def res_d_block(dtensor, depth, stride = 1):
     # diagram at https://towardsdatascience.com/an-overview-of-resnet-and-its-variants-5281e2f56035 ... seems weird but who am I to argue
     if stride == 2:
         short = MaxPool2D()(short)
-    short = Conv2D(depth, 1)(short) 
     short = BatchNormalization()(short)
     short = LeakyReLU()(short)  
+    short = Conv2D(depth, 1)(short) 
 
-    short = Conv2D(depth, 1)(short)
     short = BatchNormalization()(short)
-    short = LeakyReLU()(short)    
+    short = LeakyReLU()(short)        
+    short = Conv2D(depth, 1)(short)
     
         
     return Add()([conv, short])
