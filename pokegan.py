@@ -30,19 +30,22 @@ METRICS=[keras.metrics.categorical_accuracy]
 
 INIT='glorot_normal'
 
-GEN_WEIGHTS="gen-weights-%d.hdf5"
-DISCRIM_WEIGHTS="discrim-weights-%d.hdf5"
+GEN_WEIGHTS="gen-weights-{}.hdf5"
+DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
 
 
 load_disc=None
 load_gen=None
 start_epoch=1
 
+tags = ["A", "B", "C", "D"]
+
 for i in range(len(sys.argv)):
     if sys.argv[i] == '-epoch':
         start_epoch = int(sys.argv[i+1]) # for convenience when resuming
-        load_disc = DISCRIM_WEIGHTS % (start_epoch,)
-        load_gen = GEN_WEIGHTS % (start_epoch,)
+        tag = tags[ start_epoch % len(tags) ]
+        load_disc = DISCRIM_WEIGHTS.format(tag)
+        load_gen = GEN_WEIGHTS.format(tag)
         start_epoch += 1
     if sys.argv[i] == '-d':
         load_disc = sys.argv[i+1]
@@ -55,17 +58,19 @@ for i in range(len(sys.argv)):
 ###
 
 train_datagen = ImageDataGenerator(
-        rescale=1./255,
+        rescale=1./127,
         width_shift_range=3,
         height_shift_range=3,
-        fill_mode='constant',
+        fill_mode='nearest',
         cval=255,
-        horizontal_flip=False)
+        horizontal_flip=False,
+        data_format='channels_first',
+        preprocessing_function = lambda img : img - 127)
 
 train_generator = train_datagen.flow_from_directory(
         './dir_per_class',
         target_size=(64, 64),
-        batch_size=32,
+        batch_size=24,
         class_mode='sparse',
         interpolation='lanczos')
 
@@ -75,69 +80,72 @@ num_classes = train_generator.num_classes + 1 # pokemon + fake
 ### D I S C R I M I N A T O R
 ###
 
-def d_block(dtensor, separables = 128, depth_multiplier=1, stride=1, maxpool=False):
-    dtensor = SeparableConv2D(separables, 3, strides=stride,\
-                              depth_multiplier=depth_multiplier,\
+def d_block(dtensor, depth = 128, stride=1, maxpool=False):
+    dtensor = Conv2D(depth, 3, strides=stride,\
                               padding='same',\
-                              depthwise_initializer=INIT,\
-                              pointwise_initializer=INIT)(dtensor)
+                              kernel_initializer=INIT)(dtensor)
     dtensor = BatchNormalization()(dtensor)
     dtensor = LeakyReLU()(dtensor)
     if maxpool:
         dtensor = MaxPool2D(padding='same')(dtensor)
-    dtensor = Conv2D(separables * depth_multiplier, 1, kernel_initializer=INIT)(dtensor)
+    dtensor = Conv2D(depth, 1, kernel_initializer=INIT)(dtensor)
     dtensor = BatchNormalization()(dtensor)
     dtensor = LeakyReLU()(dtensor)
     return dtensor
 
-def res_d_block(dtensor, depth, depth_multiplier, stride = 1):
+def res_d_block(dtensor, depth, stride = 1):
     short = dtensor
     
-    conv = d_block(dtensor, depth, depth_multiplier, stride)
-    conv = d_block(conv, depth, depth_multiplier, 1)
+    conv = d_block(dtensor, depth, stride)
+    conv = d_block(conv, depth, 1)
 
     # diagram at https://towardsdatascience.com/an-overview-of-resnet-and-its-variants-5281e2f56035 ... seems weird but who am I to argue
     if stride == 2:
-        short = AveragePooling2D()(short)
+        short = MaxPool2D()(short)
+    short = Conv2D(depth, 1)(short) 
     short = BatchNormalization()(short)
     short = LeakyReLU()(short)  
-    short = Conv2D(depth * depth_multiplier, 1)(short) # kernel size of stride is probably wrong
 
+    short = Conv2D(depth, 1)(short)
     short = BatchNormalization()(short)
     short = LeakyReLU()(short)    
-    short = Conv2D(depth * depth_multiplier, 1)(short)
+    
         
     return Add()([conv, short])
     
 def Discriminator():
     dense_dropout = 0.1
     
-    inp = Input((64,64,3))
+    inp = Input((3,64,64))
     
     
     # fine feature discrimation in two full conv layers?
-    d = Conv2D(64, 7, padding='same', input_shape=(64,64,3), kernel_initializer=INIT, strides=2)(inp)
+    d = Conv2D(32, 3, padding='same', input_shape=(3,64,64), kernel_initializer=INIT)(inp)
+    BatchNormalization()(d)
+    LeakyReLU()(d)
+    
+    d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, strides=2)(d)
     BatchNormalization()(d)
     LeakyReLU()(d)
     
     # 32x32 here
     
-    # strided depthwise separable convolutions to classify high level features
-    d = res_d_block(d, 64, 3, stride=2) # 16x16
-    #d = res_d_block(d, 64, 3)
-    d = res_d_block(d, 64, 3)
+    # strided depthwise separable convolutions to classify higher level features
+    d = res_d_block(d, 64, stride=2) # 16x16
+    #d = res_d_block(d, 64)
+    d = res_d_block(d, 64)
 
-    d = res_d_block(d, 128, 3, stride=2) # 8x8
-    #d = res_d_block(d, 128, 3)
-    d = res_d_block(d, 128, 3)
+    d = res_d_block(d, 256, stride=2) # 8x8
+    #d = res_d_block(d, 256)
+    d = res_d_block(d, 256)
 
-    d = res_d_block(d, 256, 3, stride=2) # 4x4
-    #d = res_d_block(d, 256, 3)
-    d = res_d_block(d, 256, 3)
+    d = res_d_block(d, 512, stride=2) # 4x4
+    #d = res_d_block(d, 512)
+    d = res_d_block(d, 512)
 
-    d = res_d_block(d, 512, 3, stride=2) # 2x2
+    d = res_d_block(d, 1024, stride=2) # 2x2
     #d = res_d_block(d, 512, 3)
-    d = res_d_block(d, 512, 3)    
+    d = res_d_block(d, 1024)    
 
     # smush feature maps?
     d = Conv2D(1024, 1, kernel_initializer=INIT)(d) 
@@ -181,50 +189,52 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True):
     
     conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT)(conv)
     conv = BatchNormalization()(conv)    
-    conv = LeakyReLU()(conv)     
+    conv = LeakyReLU(alpha=0.1)(conv)     
     
-    conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
+    conv = Conv2D(depth, 3, padding='same', kernel_initializer=INIT)(conv)
     conv = BatchNormalization()(conv)
-    conv = LeakyReLU()(conv)  
+    conv = LeakyReLU(alpha=0.1)(conv)  
     
     return conv
     
-NOISE = num_classes*2
+NOISE = 50
     
 def Generator():
     input = Input((NOISE+num_classes,))
-    g = Dense(4*4*NOISE, kernel_initializer=INIT)(input)
+    g = Dense(1024, kernel_initializer=INIT)(input)
     g = BatchNormalization()(g)
-    g = LeakyReLU()(g)
+    g = LeakyReLU(alpha=0.1)(g)
 
-    g = Dense(4*4*NOISE, kernel_initializer=INIT)(input)
+    g = Dense(4*4*512, kernel_initializer=INIT)(input)
     g = BatchNormalization()(g)
-    g = LeakyReLU()(g)
+    g = LeakyReLU(alpha=0.1)(g)
     
-    g = Reshape(target_shape=(4,4,NOISE))(g)
+    g = Reshape(target_shape=(512,4,4))(g)
+
+    h = g_block(g, 512, 2, upsample=False) # 16x16    
+    g = g_block(g, 512) # 8x8  
     
-    g = g_block(g, 512, 2, upsample=False) # 8x8  
-    
-    h = g_block(g, 256, 2, upsample=False) # 16x16
+    h = g_block(h, 256, 2, upsample=False) # 16x16
     g = g_block(g, 256) # 16x16
     
     h = g_block(h, 128, 2, upsample=False)  # 32x32
     g = g_block(g, 128)  # 32x32
     
-    h = g_block(h, 64, 2, size=5, upsample=False) # 64x64
-    g = g_block(g, 64, size=5)  # 64x64
-    g = Concatenate()([g, h])
+    h = g_block(h, 64, 2, upsample=False) # 64x64
+    g = g_block(g, 64)  # 64x64
+    g = Concatenate(axis=1)([g, h])
 
     # I don't know what these are supposed to do but whatever:
-    g = Conv2D(256, 1, padding='same', kernel_initializer=INIT)(g)
+    g = Conv2DTranspose(512, 1, padding='same', kernel_initializer=INIT)(g)
     g = BatchNormalization()(g)
-    g = LeakyReLU()(g)
+    g = LeakyReLU(alpha=0.1)(g)
 
     g = Conv2D(256, 1, padding='same', kernel_initializer=INIT)(g)
     g = BatchNormalization()(g)
-    g = LeakyReLU()(g)
+    g = LeakyReLU(alpha=0.1)(g)
     
     g = Conv2D(3, 1, activation='sigmoid')(g)
+    g = Reshape((3, 64, 64))(g) # not sure if needed but we're doing channels_first; it helps as a sanity check when coding, at least!
     
     gen = Model(inputs=input, outputs=g)
     gen.summary()
@@ -242,7 +252,7 @@ gen.compile(optimizer=RMSprop(), loss='categorical_crossentropy', metrics=METRIC
 # _class is one-hot category array
 # randomized if None
 def gen_input(_class=None):
-    noise = np.random.uniform(-2.0, 2.0, NOISE).clip(-1.0,1.0) # partially saturated noise to encourage features to be fully on or off?
+    noise = np.random.uniform(-1.0, 1.0, NOISE).clip(-1.0,1.0) # partially saturated noise to encourage features to be fully on or off?
     if type(_class) == type(None):
         _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes) * random.uniform(0.9,1.0)
     return np.concatenate((_class, noise))
@@ -264,10 +274,12 @@ def render(all_out, filenum=0):
     plots = plots.reshape(len(plots) * len(plots[0]))
     for i in range(len(all_out)):
         out = all_out[i]
-        out = out.reshape(64, 64, 3)
-        out = np.uint8(out*255)
+        out = out.reshape(3, 64, 64)
+        out = np.uint8(out * 127 + 127)
+        out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
+        #print("check this: ")
+        #print(out.shape)
         img = PIL.Image.fromarray(out)
-        img.resize((128,128))
         plots[i].imshow(img)
         plots[i].axis('off')
         #plots[i].get_yaxis().set_visible(False)
@@ -279,7 +291,7 @@ def sample(filenum=0):
     all_out = []
     classes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
     print(len(classes))
-    _classidx=1
+    _classidx=0
     for i in range(16):
         inp = gen_input_batch([keras.utils.to_categorical(classes[x], num_classes=num_classes) for x in range(_classidx,_classidx+4)])
         _classidx+=4
@@ -345,6 +357,7 @@ for epoch in range(start_epoch,EPOCHS+1):
     #train_generator.reset()
     sample(epoch)
     if epoch % 5 == 0:
-        gen.save(GEN_WEIGHTS % (epoch,))
-        discrim.save(DISCRIM_WEIGHTS % (epoch,))
+        tag = tags[epoch % len(tags)]
+        gen.save(GEN_WEIGHTS.format(tag))
+        discrim.save(DISCRIM_WEIGHTS.format(tag))
     
