@@ -19,7 +19,6 @@ import keras
 import random,math
 import sys,os
 
-import matplotlib.pyplot as plot
 import PIL
 
 from scipy import ndimage
@@ -105,7 +104,7 @@ def res_d_block(dtensor, depth, stride = 1):
 
     # diagram at https://towardsdatascience.com/an-overview-of-resnet-and-its-variants-5281e2f56035 ... seems weird but who am I to argue
     if stride == 2:
-        short = MaxPool2D()(short)
+        short = AveragePooling2D()(short)
     short = BatchNormalization()(short)
     short = LeakyReLU()(short)  
     short = Conv2D(depth, 1)(short) 
@@ -124,42 +123,33 @@ def Discriminator():
     
     
     # fine feature discrimation in two full conv layers?
-    d = Conv2D(32, 3, padding='same', input_shape=(3,64,64), kernel_initializer=INIT)(inp)
+    d = Conv2D(32, 5, padding='same', input_shape=(3,64,64), kernel_initializer=INIT)(inp)
     BatchNormalization()(d)
     LeakyReLU()(d)
     
-    d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, strides=2)(d)
+    d = Conv2D(64, 3, padding='same', kernel_initializer=INIT, strides=2)(d)
     BatchNormalization()(d)
     LeakyReLU()(d)
     
     # 32x32 here
+    d = d_block(d, 256, 2) # 16x16
+    d = d_block(d, 512, 2) # 8x8
+    d = d_block(d, 1024, 2) # 4x4
+    d = d_block(d, 2048, 2) # 2x2
     
-    # strided depthwise separable convolutions to classify higher level features
-    d = res_d_block(d, 64, stride=2) # 16x16
-    #d = res_d_block(d, 64)
-    d = res_d_block(d, 64)
-
-    d = res_d_block(d, 256, stride=2) # 8x8
-    #d = res_d_block(d, 256)
-    d = res_d_block(d, 256)
-
-    d = res_d_block(d, 512, stride=2) # 4x4
-    #d = res_d_block(d, 512)
-    d = res_d_block(d, 512)
-
-    d = res_d_block(d, 1024, stride=2) # 2x2
-    #d = res_d_block(d, 512, 3)
-    d = res_d_block(d, 1024)    
-
+    e = MaxPool2D()(d)
+    e = Flatten()(e)
+    
     # smush feature maps?
     d = Conv2D(1024, 1, kernel_initializer=INIT)(d) 
     d = BatchNormalization()(d)
     d = LeakyReLU()(d)
     
     d = Flatten()(d)
+    d = Concatenate()([d,e])
 
     # classify ??
-    d = Dense(num_classes*3, kernel_initializer=INIT)(d)
+    d = Dense(1024, kernel_initializer=INIT)(d)
     d = BatchNormalization()(d)
     d = Dropout(dense_dropout)(d)
     d = LeakyReLU()(d)
@@ -180,7 +170,7 @@ if load_disc and os.path.isfile(load_disc):
 else:
     print("not loading weights for discriminator")
 
-discrim.compile(optimizer=Nadam(), loss='categorical_crossentropy', metrics=METRICS)
+discrim.compile(optimizer=Nadam(), loss='kullback_leibler_divergence', metrics=METRICS)
 
 ###
 ### G E N E R A T O R
@@ -192,11 +182,11 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True):
         conv = UpSampling2D()(conv)
     
     conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT)(conv)
-    conv = BatchNormalization()(conv)    
+    #conv = BatchNormalization()(conv)    
     conv = LeakyReLU(alpha=0.1)(conv)     
     
     conv = Conv2D(depth, 3, padding='same', kernel_initializer=INIT)(conv)
-    conv = BatchNormalization()(conv)
+    #conv = BatchNormalization()(conv)
     conv = LeakyReLU(alpha=0.1)(conv)  
     
     return conv
@@ -205,34 +195,31 @@ NOISE = 50
     
 def Generator():
     input = Input((NOISE+num_classes,))
-    g = Dense(1024, kernel_initializer=INIT)(input)
-    g = BatchNormalization()(g)
+    g = Dense(512, kernel_initializer=INIT)(input)
     g = LeakyReLU(alpha=0.1)(g)
 
-    g = Dense(4*4*512, kernel_initializer=INIT)(input)
-    g = BatchNormalization()(g)
+    g = Dense(4*4*512, kernel_initializer=INIT)(g)
     g = LeakyReLU(alpha=0.1)(g)
     
     g = Reshape(target_shape=(512,4,4))(g)
 
-    h = g_block(g, 512, 2, upsample=False) # 16x16    
-    g = g_block(g, 512) # 8x8  
+    g = g_block(g, 512, 2, upsample=False) # 16x16    
     
-    h = g_block(h, 256, 2, upsample=False) # 16x16
-    g = g_block(g, 256) # 16x16
+    g = g_block(g, 512, 2, upsample=False) # 16x16
     
-    h = g_block(h, 128, 2, upsample=False)  # 32x32
-    g = g_block(g, 128)  # 32x32
+    g = g_block(g, 256, 2, upsample=False)  # 32x32
     
-    h = g_block(h, 64, 2, upsample=False) # 64x64
-    g = g_block(g, 64)  # 64x64
-    g = Concatenate(axis=1)([g, h])
+    g = g_block(g, 128, 2, upsample=False) # 64x64
 
     # I don't know what these are supposed to do but whatever:
-    g = Conv2DTranspose(512, 1, padding='same', kernel_initializer=INIT)(g)
+    g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
     g = BatchNormalization()(g)
     g = LeakyReLU(alpha=0.1)(g)
 
+    g = Conv2DTranspose(256, 3, padding='same', kernel_initializer=INIT)(g)
+    g = BatchNormalization()(g)
+    g = LeakyReLU(alpha=0.1)(g)
+    
     g = Conv2D(256, 1, padding='same', kernel_initializer=INIT)(g)
     g = BatchNormalization()(g)
     g = LeakyReLU(alpha=0.1)(g)
@@ -251,14 +238,14 @@ if load_gen and os.path.isfile(load_gen):
 else:
     print("not loading weights for generator")
 
-gen.compile(optimizer=RMSprop(), loss='categorical_crossentropy', metrics=METRICS)
+gen.compile(optimizer=Nadam(clipnorm=1.0), loss='kullback_leibler_divergence', metrics=METRICS)
 
 # _class is one-hot category array
 # randomized if None
 def gen_input(_class=None):
-    noise = np.random.uniform(-1.0, 1.0, NOISE).clip(-1.0,1.0) # partially saturated noise to encourage features to be fully on or off?
+    noise = np.random.uniform(0.0, 1.0, NOISE)
     if type(_class) == type(None):
-        _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes) * random.uniform(0.9,1.0)
+        _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes) * 0.95
     return np.concatenate((_class, noise))
 
 def gen_input_rand():
@@ -271,34 +258,37 @@ def gen_input_batch(classes=None):
     print("!!! Generating random batch in gen_input_batch()!")
     return np.array([gen_input_rand() for x in range(train_generator.batch_size)])
 
+
 def render(all_out, filenum=0):            
-    dim = math.ceil(math.sqrt(len(all_out)))
-    fig, plots = plot.subplots(dim, dim)
-    plot.tight_layout(h_pad=3)
-    plots = plots.reshape(len(plots) * len(plots[0]))
-    for i in range(len(all_out)):
+    pad = 3
+    swatchdim = 64 # 64x64 is the output of the generator
+    swatches = 5 # per side
+    dim = (pad+swatchdim) * swatches
+    img = PIL.Image.new("RGB", (dim, dim), "white")
+
+    for i in range(min(swatches * swatches, len(all_out))):
         out = all_out[i]
         out = out.reshape(3, 64, 64)
         out = np.uint8(out * 255)
         out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
         #print("check this: ")
         #print(out.shape)
-        img = PIL.Image.fromarray(out)
-        plots[i].imshow(img)
-        plots[i].axis('off')
-        #plots[i].get_yaxis().set_visible(False)
-        #plots[i].set_xlabel(str(i+1))
+        swatch = PIL.Image.fromarray(out)
+        x = i % swatches
+        y = math.floor(i/swatches)
+        #print((x,y))
+        img.paste(swatch, (x * (pad+swatchdim), y * (pad+swatchdim)))
 
-    plot.savefig('out%d.png' %(filenum,), dpi=400)
+    img.save('out%d.png' %(filenum,))
     
 def sample(filenum=0):
     all_out = []
     classes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
     print(len(classes))
     _classidx=0
-    for i in range(16):
-        inp = gen_input_batch([keras.utils.to_categorical(classes[x], num_classes=num_classes) for x in range(_classidx,_classidx+4)])
-        _classidx+=4
+    for i in range(5):
+        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+5)])
+        _classidx+=5
         print(inp.shape)
         batch_out = gen.predict(inp)
         print(batch_out.shape)
@@ -322,7 +312,7 @@ adver = Sequential()
 adver.add(gen)
 adver.add(discrim)
 adver.summary()
-adver.compile(optimizer=RMSprop(lr = 0.005), loss='categorical_crossentropy', metrics=METRICS)
+adver.compile(optimizer=Nadam(lr=0.003), loss='kullback_leibler_divergence', metrics=METRICS)
 
 
 ###
@@ -338,7 +328,7 @@ for epoch in range(start_epoch,EPOCHS+1):
         x,y = train_generator.next()
         if len(y) != train_generator.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
-        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * random.uniform(0.9, 1.0) for cls in y])
+        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.95 for cls in y])
         d_loss = discrim.train_on_batch(x, y)
         print("REAL: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
         
@@ -346,7 +336,7 @@ for epoch in range(start_epoch,EPOCHS+1):
         #half_y = real_y[math.floor(len(real_y)/2):]
         x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
         x = gen.predict(x_gen_input)
-        y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * random.uniform(0.9,1.0) for dummy in x])
+        y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.95 for dummy in x])
         d_loss = discrim.train_on_batch(x, y)         
         print("FAKE: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
         
