@@ -4,20 +4,15 @@ import time
 #import plaidml.keras
 #plaidml.keras.install_backend()
 
-from keras.models import Sequential, Model
-from keras.layers import Dense, Activation, Flatten, Reshape
-from keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, SeparableConv2D, MaxPool2D, AveragePooling2D, MaxPooling2D
-from keras.layers import LeakyReLU, Dropout, ReLU, PReLU
-from keras.layers import BatchNormalization
-from keras.layers import Softmax, Input, Concatenate, Add
-from keras.optimizers import Adam, Adam, Nadam
-from keras.callbacks import ModelCheckpoint
+import mxnet as mx
+from mxnet import gluon, autograd, nd
+from mxnet.gluon import HybridBlock, nn
+import numpy as np
 
-from keras import backend as K
-
+# TODO rewrite with gluon preprocessing
 from keras.preprocessing.image import ImageDataGenerator
 
-import keras
+#import keras
 import random,math
 import sys,os
 from timeit import default_timer as timer
@@ -26,32 +21,14 @@ import PIL
 
 from scipy import ndimage
 
-# from https://github.com/keras-team/keras/issues/1538
-if 'tensorflow' == K.backend():
-    import tensorflow as tf
-    from keras.backend.tensorflow_backend import set_session
-    config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = 0.7
-    config.gpu_options.allow_growth = True
-    config.gpu_options.visible_device_list = "0"
-    #session = tf.Session(config=config)
-    set_session(tf.Session(config=config))
+ctx = mx.cpu() # not sure...
 
-ctx = None
-    
-if 'mxnet' == K.backend():
-    import mxnet
-    ctx = ["gpu(0)"]
-    
-    
-
-#keras.backend.set_floatx('float16')
     
 EPOCHS = 5000
 
-METRICS=[keras.metrics.categorical_accuracy]
+#METRICS=[keras.metrics.categorical_accuracy]
 
-INIT='glorot_normal'
+INIT='Xavier'
 
 GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
@@ -101,37 +78,45 @@ train_generator = train_datagen.flow_from_directory(
         class_mode='sparse',
         interpolation='lanczos')
 
-num_classes = train_generator.num_classes + 1 # pokemon + fake
+num_classes = train_generator.num_classes + 1 # number of image classes + fake
 
 ###
 ### D I S C R I M I N A T O R
 ###
 
-def d_block(dtensor, depth = 128, stride=1, maxpool=False):
 
-    # feature detection
-    dtensor = SeparableConv2D(depth, 3, strides=1,\
-                              padding='same',\
-                              kernel_initializer=INIT)(dtensor)
-    dtensor = PReLU()(dtensor)
-    dtensor = BatchNormalization()(dtensor)
-    
-    # strided higher level feature detection
-    dtensor = SeparableConv2D(depth, 3, strides=stride,\
-                              padding='same',\
-                              kernel_initializer=INIT)(dtensor)
-    dtensor = PReLU()(dtensor)
-    dtensor = BatchNormalization()(dtensor)
-    if maxpool:
-        dtensor = MaxPool2D(padding='same')(dtensor)
-        
-    # nonsense?
-    dtensor = Conv2D(depth, 1, kernel_initializer=INIT)(dtensor)
-    dtensor = PReLU()(dtensor)
-    dtensor = BatchNormalization()(dtensor)    
-    return dtensor
+class D_block(HybridBlock):
+    def __init__(self, depth = 128, stride=1, maxpool=False, **kwargs):
+        super(D_block, self).__init__(**kwargs)
+        with self.name_scope():
+            self.body = nn.HybridSequential()
+            # feature detection
+            self.body.add(nn.Conv2D(depth, 3, strides=1,\
+                                      padding=1,\
+                                      weight_initializer=INIT))
+            self.body.add(nn.PReLU())
+            self.body.add(nn.BatchNorm())
+            
+            # strided higher level feature detection
+            self.body.add(nn.Conv2D(depth, 3, strides=stride,\
+                                      padding=1,\
+                                      weight_initializer=INIT))
+            self.body.add(nn.PReLU())
+            self.body.add(nn.BatchNorm())
+            if maxpool:
+                self.body.add(nn.MaxPool2D(3,2,1))
+                
+            # nonsense?
+            self.body.add(nn.Conv2D(depth, 1, weight_initializer=INIT))
+            self.body.add(nn.PReLU())
+            self.body.add(nn.BatchNorm())
+
+    def hybrid_forward(self, F, x):
+        #print(F)
+        return self.body(x)
 
 # unused
+unused = """
 def res_d_block(dtensor, depth, stride = 1):
     short = dtensor
     
@@ -142,80 +127,85 @@ def res_d_block(dtensor, depth, stride = 1):
     if stride == 2:
         short = AveragePooling2D()(short)
     short = PReLU()(short)  
-    short = BatchNormalization()(short)    
+    short = BatchNorm()(short)    
     short = SeparableConv2D(depth, 1)(short) 
 
     short = PReLU()(short)
-    short = BatchNormalization()(short)    
+    short = BatchNorm()(short)    
     short = SeparableConv2D(depth, 1)(short)
     short = PReLU()(short)
-    short = BatchNormalization()(short)    
+    short = BatchNorm()(short)    
     
         
     return Add()([conv, short])
+"""
     
 def Discriminator():
     dense_dropout = 0.05
     
-    inp = Input((3,64,64))
+    #inp = Input((3,64,64))
     
+    d = nn.HybridSequential()
     
     # fine feature discrimation in two full conv layers?
-    d = SeparableConv2D(32, 5, padding='same', input_shape=(3,64,64), kernel_initializer=INIT)(inp)
-    BatchNormalization()(d)
-    PReLU()(d)
+    d.add(nn.Conv2D(33, 5, padding=2, groups=3, weight_initializer=INIT))
+    d.add(nn.BatchNorm())
+    d.add(nn.PReLU())
     
-    d = SeparableConv2D(64, 3, padding='same', kernel_initializer=INIT, strides=2)(d)
-    BatchNormalization()(d)
-    PReLU()(d)
+    d.add(nn.Conv2D(66, 3, padding=1, groups=3, weight_initializer=INIT, strides=2))
+    d.add(nn.BatchNorm())
+    d.add(nn.PReLU())
     
     # 32x32 here
-    d = d_block(d, 256, 2) # 16x16
-    d = d_block(d, 512, 2) # 8x8
-    d = d_block(d, 512, 2) # 4x4
-    d = d_block(d, 512, 2) # 2x2
+    d.add(D_block(256, 2)) # 16x16
+    d.add(D_block(512, 2)) # 8x8
+    d.add(D_block(512, 2)) # 4x4
+    d.add(D_block(512, 2)) # 2x2
     
-    e = MaxPooling2D()(d)
-    e = Flatten()(e)
+    #e = MaxPooling2D())
+    #e = Flatten()(e)
     
-    d = Conv2D(512, 1, kernel_initializer=INIT)(d) 
-    d = PReLU()(d)
-    d = BatchNormalization()(d)
+    d.add(nn.Conv2D(512, 1, weight_initializer=INIT)) 
+    d.add(nn.PReLU())
+    d.add(nn.BatchNorm())
     
-    d = Flatten()(d)
-    d = Concatenate()([d,e])
+    d.add(nn.Flatten())
+    #d.add(nn.Concatenate()([d,e])
 
     # classify ??
-    d = Dense(512, kernel_initializer=INIT)(d)
-    d = Dropout(dense_dropout)(d)
-    d = PReLU()(d)
-    d = BatchNormalization()(d)
+    d.add(nn.Dense(512, weight_initializer=INIT))
+    d.add(nn.Dropout(dense_dropout))
+    d.add(nn.PReLU())
+    d.add(nn.BatchNorm())
     
-    d = Dense(512, kernel_initializer=INIT)(d)
-    d = Dropout(dense_dropout)(d)
-    d = PReLU()(d)
-    d = BatchNormalization()(d)    
+    d.add(nn.Dense(512, weight_initializer=INIT))
+    d.add(nn.Dropout(dense_dropout))
+    d.add(nn.PReLU())
+    d.add(nn.BatchNorm())    
     
-    d = Dense(num_classes, kernel_initializer=INIT)(d)
-    d = Softmax()(d)
+    d.add(nn.Dense(num_classes, weight_initializer=INIT))
+    #d.add(nn.Softmax())
         
-    discrim = Model(inputs=inp, outputs=d)    
+    #discrim = Model(inputs=inp, outputs=d)    
 
-    return discrim
+    return d
 
 discrim = Discriminator()
 
-discrim.summary()
+discrim.initialize(ctx=ctx)
+
+discrim.summary(nd.zeros((25,3,64,64)))
+
 
 if load_disc and os.path.isfile(load_disc):
     discrim.load_weights(load_disc)
 else:
     print("not loading weights for discriminator")
 
-if ctx == None:    
-    discrim.compile(optimizer=Adam(), loss='kullback_leibler_divergence', metrics=METRICS) #, context= ["gpu(0)"])
-else:
-    discrim.compile(optimizer=Adam(), loss='kullback_leibler_divergence', metrics=METRICS, context=ctx)
+discrim.hybridize()
+trainerD = gluon.Trainer(discrim.collect_params(), 'RMSprop')
+
+exit()
 
 ###
 ### G E N E R A T O R
@@ -226,18 +216,18 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True):
     if upsample: 
         conv = UpSampling2D()(conv)
 
-    #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
-    conv = Conv2D(depth, 3, padding='same', kernel_initializer=INIT)(conv)
+    #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', weight_initializer=INIT)(conv)
+    conv = Conv2D(depth, 3, padding='same', weight_initializer=INIT)(conv)
     conv = PReLU()(conv)  
-    conv = BatchNormalization()(conv)
+    conv = BatchNorm()(conv)
         
-    #conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT)(conv)
+    #conv = Conv2DTranspose(depth, size, padding='same', strides=stride, weight_initializer=INIT)(conv)
     #conv = PReLU()(conv)     
-    #conv = BatchNormalization()(conv)    
+    #conv = BatchNorm()(conv)    
 
-    #conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
+    #conv = Conv2D(depth, 1, padding='same', weight_initializer=INIT)(conv)
     #conv = PReLU()(conv)  
-    #conv = BatchNormalization()(conv)    
+    #conv = BatchNorm()(conv)    
     
     return conv
     
@@ -245,13 +235,13 @@ NOISE = 50
     
 def Generator():
     input = Input((NOISE+num_classes,))
-    #g = Dense(512, kernel_initializer=INIT)(input)    
+    #g = Dense(512, weight_initializer=INIT)(input)    
     #g = PReLU()(g)
-    #g = BatchNormalization()(g)
+    #g = BatchNorm()(g)
 
-    g = Dense(4*4*512, kernel_initializer=INIT)(input)
+    g = Dense(4*4*512, weight_initializer=INIT)(input)
     g = PReLU()(g)
-    g = BatchNormalization()(g)
+    g = BatchNorm()(g)
     
     g = Reshape(target_shape=(512,4,4))(g)
 
@@ -267,17 +257,17 @@ def Generator():
     
     g = g_block(g, 64, 1, size=3, upsample=False) # 64x64
     
-    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
+    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', weight_initializer=INIT)(g)
     #g = PReLU()(g)
-    #g = BatchNormalization()(g)
+    #g = BatchNorm()(g)
 
-    #g = Conv2DTranspose(256, 3, padding='same', kernel_initializer=INIT)(g)
+    #g = Conv2DTranspose(256, 3, padding='same', weight_initializer=INIT)(g)
     #g = PReLU()(g)
-    #g = BatchNormalization()(g)
+    #g = BatchNorm()(g)
     
-    #g = Conv2D(1024, 1, padding='same', kernel_initializer=INIT)(g)
+    #g = Conv2D(1024, 1, padding='same', weight_initializer=INIT)(g)
     #g = PReLU()(g)
-    #g = BatchNormalization()(g)
+    #g = BatchNorm()(g)
     
     g = Conv2D(3, 1, activation='sigmoid')(g)
     g = Reshape((3, 64, 64))(g) # not sure if needed but we're doing channels_first; it helps as a sanity check when coding, at least!
@@ -297,10 +287,10 @@ else:
 # _class is one-hot category array
 # randomized if None
 def gen_input(_class=None):
-    noise = np.random.uniform(0.0, 1.0, NOISE)
+    noise = nd.random.uniform(0.0, 1.0, NOISE)
     if type(_class) == type(None):
         _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes) * 0.95
-    return np.concatenate((_class, noise))
+    return nd.concatenate((_class, noise))
 
 def gen_input_rand():
     return gen_input()
@@ -308,9 +298,9 @@ def gen_input_rand():
 # optionally receives one-hot class array from training loop
 def gen_input_batch(classes=None):
     if type(classes) != type(None):
-        return np.array([gen_input(cls) for cls in classes])
+        return nd.array([gen_input(cls) for cls in classes])
     print("!!! Generating random batch in gen_input_batch()!")
-    return np.array([gen_input_rand() for x in range(train_generator.batch_size)])
+    return nd.array([gen_input_rand() for x in range(train_generator.batch_size)])
 
 
 def render(all_out, filenum=0):            
@@ -323,8 +313,8 @@ def render(all_out, filenum=0):
     for i in range(min(swatches * swatches, len(all_out))):
         out = all_out[i]
         out = out.reshape(3, 64, 64)
-        out = np.uint8(out * 255)
-        out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
+        out = nd.uint8(out * 255)
+        out = nd.moveaxis(out, 0, -1) # switch from channels_first to channels_last
         #print("check this: ")
         #print(out.shape)
         swatch = PIL.Image.fromarray(out)
@@ -413,7 +403,7 @@ for epoch in range(start_epoch,EPOCHS+1):
         x,y = train_generator.next()
         if len(y) != train_generator.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
-        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.95 for cls in y])
+        y = real_y = nd.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.95 for cls in y])
         set_lr(discrim, disc_real_lr)
         d_loss = discrim.train_on_batch(x, y)
         print("REAL: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
@@ -423,7 +413,7 @@ for epoch in range(start_epoch,EPOCHS+1):
         #half_y = real_y[math.floor(len(real_y)/2):]
         x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
         x = gen.predict(x_gen_input)
-        y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.95 for dummy in x])
+        y = nd.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.95 for dummy in x])
         set_lr(discrim, disc_fake_lr)
         d_loss = discrim.train_on_batch(x, y)         
         print("FAKE: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
