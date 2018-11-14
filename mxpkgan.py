@@ -21,7 +21,7 @@ import PIL
 
 from scipy import ndimage
 
-ctx = mx.cpu() # not sure...
+ctx = mx.gpu() # not sure...
 
     
 EPOCHS = 5000
@@ -74,7 +74,7 @@ train_datagen = ImageDataGenerator(
 train_generator = train_datagen.flow_from_directory(
         './dir_per_class',
         target_size=(64, 64),
-        batch_size=20,
+        batch_size=5,
         class_mode='sparse',
         interpolation='lanczos')
 
@@ -202,7 +202,7 @@ if load_disc and os.path.isfile(load_disc):
 else:
     print("not loading weights for discriminator")
 
-discrim.hybridize()
+#discrim.hybridize()
 trainerD = gluon.Trainer(discrim.collect_params(), 'RMSprop')
 
 #exit()
@@ -301,7 +301,8 @@ if load_gen and os.path.isfile(load_gen):
 else:
     print("not loading weights for generator")
 
-gen.hybridize()
+#gen.hybridize()
+trainerG = gluon.Trainer(gen.collect_params(), 'RMSprop')
 
 # _class is one-hot category array
 # randomized if None
@@ -366,7 +367,7 @@ def sample(filenum=0):
 #render(train_generator.next()[0], -99)
 sample(0)
 train_generator.reset()
-exit()
+#exit()
 
 ###
 ### adversarial model
@@ -374,20 +375,12 @@ exit()
 #for layer in discrim.layers:
 #    layer.trainable = False
 
-discrim.trainable = False
+#discrim.trainable = False
 
-adver = Sequential()
-adver.add(gen)
-adver.add(discrim)
-adver.summary()
-
-if ctx == None:
-    adver.compile(optimizer=Adam(), loss='kullback_leibler_divergence', metrics=METRICS) #, context= ["gpu(0)"])
-    gen.compile(optimizer=Adam(), loss='kullback_leibler_divergence', metrics=METRICS) #, context= ["gpu(0)"])
-else:
-    adver.compile(optimizer=Adam(), loss='kullback_leibler_divergence', metrics=METRICS, context=ctx)
-    gen.compile(optimizer=Adam(), loss='kullback_leibler_divergence', metrics=METRICS, context=ctx)
-
+#adver = Sequential()
+#adver.add(gen)
+#adver.add(discrim)
+#adver.summary()
 
 
 ###
@@ -395,14 +388,19 @@ else:
 ###
 
 def get_lr(model):
-    return float(keras.backend.eval(model.optimizer.lr))
+    #return float(keras.backend.eval(model.optimizer.lr))
+    return 1.0 # TODO
 
 def set_lr(model, newlr):
-    model.optimizer.lr = keras.backend.variable(newlr)
+    pass
+    #model.optimizer.lr = keras.backend.variable(newlr)
+    # TODO
     
 ###
 ### T R A I N
 ###
+
+loss = mx.gluon.loss.HingeLoss()
 
 batches = math.floor(train_generator.n / train_generator.batch_size)
 
@@ -410,8 +408,8 @@ disc_start_lr = get_lr(discrim)
 disc_real_lr = get_lr(discrim)
 disc_fake_lr = get_lr(discrim)
 
-adver_start_lr = get_lr(adver)
-adver_lr = get_lr(adver)
+#adver_start_lr = get_lr(adver)
+#adver_lr = get_lr(adver)
 
 batches_timed = 0
 total_time = 0
@@ -424,31 +422,52 @@ for epoch in range(start_epoch,EPOCHS+1):
         x,y = train_generator.next()
         if len(y) != train_generator.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
-        y = real_y = nd.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.95 for cls in y])
-        set_lr(discrim, disc_real_lr)
-        d_loss = discrim.train_on_batch(x, y)
-        print("REAL: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
-        disc_real_lr = abs(min(1.0, d_loss[0])) * disc_start_lr
+        y = real_y = nd.one_hot(nd.array(y), num_classes)
+        #set_lr(discrim, disc_real_lr)
         
-        # get fake data
-        #half_y = real_y[math.floor(len(real_y)/2):]
-        x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
-        x = gen.predict(x_gen_input)
-        y = nd.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.95 for dummy in x])
-        set_lr(discrim, disc_fake_lr)
-        d_loss = discrim.train_on_batch(x, y)         
-        print("FAKE: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
-        disc_fake_lr = abs(min(1.0, d_loss[0])) * disc_start_lr
+        with autograd.record():
+            # real data loss
+            real_output = discrim(nd.array(x))
+            errD_real = loss(real_output, real_y)
+
+            #disc_real_lr = abs(min(1.0, d_loss[0])) * disc_start_lr
         
-        #x = gen_input_batch() 
+            # get fake data
+            #half_y = real_y[math.floor(len(real_y)/2):]            
+            x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
+            fake_x = gen(x_gen_input)
+            y = nd.one_hot(nd.array([num_classes-1 for dummy in x]), num_classes) * 0.95
+            #set_lr(discrim, disc_fake_lr)
+            fake_output = discrim(fake_x.detach()) # why detach()?
+            errD_fake = loss(fake_output, y)
+            errD = (errD_real + errD_fake) * 0.5
+            #print("loss REAL: {}, FAKE: {}".format(errD_real.mean(), errD_fake.mean()))
+            errD.backward()
+
+            #x = gen_input_batch() 
+        
+        trainerD.step(train_generator.batch_size)
+        
         #y = np.array([inp[:num_classes] for inp in x])
-        set_lr(adver, adver_lr)
-        a_loss = adver.train_on_batch(x_gen_input, real_y)
-        print("ADVR: a_loss %f, %s %f " % (a_loss[0], adver.metrics_names[1], a_loss[1]))
-        x_gen_input = gen_input_batch(real_y) # same classes, different noise
-        a_loss = adver.train_on_batch(x_gen_input, real_y)
-        print("ADVR: a_loss %f, %s %f @ %d/%d\n" % (a_loss[0], adver.metrics_names[1], a_loss[1], batch_num, batches))
-        adver_lr = abs(min(2.0, a_loss[0])) * adver_start_lr
+        #set_lr(adver, adver_lr)
+        with autograd.record():
+            output = discrim(fake_x)
+            errG = loss(output, real_y)
+            #print("loss ADVR: {}".format(errG))
+            x_gen_input = gen_input_batch(real_y) # same classes, different noise
+            fake_x = gen(x_gen_input)
+            #a_loss = adver.train_on_batch(x_gen_input, real_y)
+            output = discrim(fake_x)
+            errG2 = loss(output, real_y)
+            #print("loss ADV2: {}".format(errG2))
+            errG = (errG + errG2) * 0.5
+            errG.backward()
+            #print("loss ADVR: mean {}".format(errG.mean()))
+            #print("ADVR: a_loss %f, %s %f @ %d/%d\n" % (a_loss[0], adver.metrics_names[1], a_loss[1], batch_num, batches))
+            #adver_lr = abs(min(2.0, a_loss[0])) * adver_start_lr
+        
+        trainerG.step(train_generator.batch_size)
+        
         end = timer()
         batches_timed += 1
         total_time += (end - start)
