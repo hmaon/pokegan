@@ -87,7 +87,7 @@ num_classes = train_generator.num_classes + 1 # number of image classes + fake
 
 class D_block(HybridBlock):
     def __init__(self, depth = 128, stride=1, maxpool=False, **kwargs):
-        super(D_block, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         with self.name_scope():
             self.body = nn.HybridSequential()
             # feature detection
@@ -147,7 +147,7 @@ def Discriminator():
     
     d = nn.HybridSequential()
     
-    # fine feature discrimation in two full conv layers?
+    # fine feature discrimation in two conv layers?
     d.add(nn.Conv2D(33, 5, padding=2, groups=3, weight_initializer=INIT))
     d.add(nn.BatchNorm())
     d.add(nn.PReLU())
@@ -194,103 +194,122 @@ discrim = Discriminator()
 
 discrim.initialize(ctx=ctx)
 
-discrim.summary(nd.zeros((25,3,64,64)))
+discrim.summary(nd.zeros((train_generator.batch_size,3,64,64)))
 
 
 if load_disc and os.path.isfile(load_disc):
-    discrim.load_weights(load_disc)
+    discrim.load_parameters(load_disc, ctx=ctx)
 else:
     print("not loading weights for discriminator")
 
 discrim.hybridize()
 trainerD = gluon.Trainer(discrim.collect_params(), 'RMSprop')
 
-exit()
+#exit()
 
 ###
 ### G E N E R A T O R
 ###
 
-def g_block(gtensor, depth=32, stride=1, size=3, upsample=True):
-    conv = gtensor
-    if upsample: 
-        conv = UpSampling2D()(conv)
+class G_block(HybridBlock):
+    def __init__(self, depth=32, stride=1, size=3, upsample=True, **kwargs):
+        super().__init__(**kwargs)
+        self.upsample=upsample
+        self.conv = nn.HybridSequential()
+        with self.name_scope():
+            #if upsample: 
+            #    self.conv.add(nn.UpSampling2D())
 
-    #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', weight_initializer=INIT)(conv)
-    conv = Conv2D(depth, 3, padding='same', weight_initializer=INIT)(conv)
-    conv = PReLU()(conv)  
-    conv = BatchNorm()(conv)
+            #conv.add(SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', weight_initializer=INIT))
+            self.conv.add(nn.Conv2D(depth, 3, padding=1, groups=1, weight_initializer=INIT))
+            self.conv.add(nn.PReLU())  
+            self.conv.add(nn.BatchNorm())
+                
+            #self.conv.add(self.conv2DTranspose(depth, size, padding='same', strides=stride, weight_initializer=INIT))
+            #self.conv.add(PReLU())     
+            #self.conv.add(BatchNorm())    
+
+            self.conv.add(nn.Conv2D(depth, 1, padding=0, weight_initializer=INIT))
+            self.conv.add(nn.PReLU())  
+            self.conv.add(nn.BatchNorm())    
+    
+    def hybrid_forward(self, F, x):
+        if self.upsample:
+            # I think this is genuinely awful
+            # the weights parameter is not needed with 'nearest' sample_type but then I still have to slice it off the bottom of the channels from the result; why is it even there?
+            # also! the slicing isn't possible when x is of type Symbol!
+            x = F.UpSampling(x, F.zeros_like(x), scale=2, sample_type='nearest', num_args=2)
+        return self.conv(x)
+
+
+class Reshape(HybridBlock):
+    def __init__(self, target_shape, **kwargs):
+        super().__init__(**kwargs)
+        self.target_shape = target_shape
+    
+    def hybrid_forward(self, F, x):
+        return x.reshape(self.target_shape)
         
-    #conv = Conv2DTranspose(depth, size, padding='same', strides=stride, weight_initializer=INIT)(conv)
-    #conv = PReLU()(conv)     
-    #conv = BatchNorm()(conv)    
-
-    #conv = Conv2D(depth, 1, padding='same', weight_initializer=INIT)(conv)
-    #conv = PReLU()(conv)  
-    #conv = BatchNorm()(conv)    
-    
-    return conv
-    
 NOISE = 50
     
 def Generator():
-    input = Input((NOISE+num_classes,))
-    #g = Dense(512, weight_initializer=INIT)(input)    
-    #g = PReLU()(g)
-    #g = BatchNorm()(g)
+    g = nn.HybridSequential()
+    
+    g.add(nn.Dense(4*4*512, weight_initializer=INIT))
+    g.add(nn.PReLU())
+    g.add(nn.BatchNorm())
+    
+    g.add(Reshape(target_shape=(train_generator.batch_size,512,4,4)))
 
-    g = Dense(4*4*512, weight_initializer=INIT)(input)
-    g = PReLU()(g)
-    g = BatchNorm()(g)
+    g.add(G_block(512, 2, upsample=True)) # 8x8
     
-    g = Reshape(target_shape=(512,4,4))(g)
-
-    g = g_block(g, 512, 2, upsample=True) # 8x8
+    g.add(G_block(256, 2, upsample=True)) # 16x16
     
-    g = g_block(g, 256, 2, upsample=True) # 16x16
+    g.add(G_block(128, 2, size=5, upsample=True))  # 32x32
     
-    g = g_block(g, 128, 2, size=5, upsample=True)  # 32x32
-    
-    g = g_block(g, 64, 2, size=5, upsample=True) # 64x64
+    g.add(G_block(64, 2, size=5, upsample=True)) # 64x64
 
     # I don't know what these are supposed to do but whatever:
     
-    g = g_block(g, 64, 1, size=3, upsample=False) # 64x64
+    g.add(G_block(64, 1, size=3, upsample=False)) # 64x64
     
-    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', weight_initializer=INIT)(g)
-    #g = PReLU()(g)
-    #g = BatchNorm()(g)
+    #g.add(SeparableConv2D(256, 3, depth_multiplier=2, padding='same', weight_initializer=INIT))
+    #g.add(PReLU())
+    #g.add(BatchNorm())
 
-    #g = Conv2DTranspose(256, 3, padding='same', weight_initializer=INIT)(g)
-    #g = PReLU()(g)
-    #g = BatchNorm()(g)
+    #g.add(Conv2DTranspose(256, 3, padding='same', weight_initializer=INIT))
+    #g.add(PReLU())
+    #g.add(BatchNorm())
     
-    #g = Conv2D(1024, 1, padding='same', weight_initializer=INIT)(g)
-    #g = PReLU()(g)
-    #g = BatchNorm()(g)
+    #g.add(Conv2D(1024, 1, padding='same', weight_initializer=INIT))
+    #g.add(PReLU())
+    #g.add(BatchNorm())
     
-    g = Conv2D(3, 1, activation='sigmoid')(g)
-    g = Reshape((3, 64, 64))(g) # not sure if needed but we're doing channels_first; it helps as a sanity check when coding, at least!
+    g.add(nn.Conv2D(3, 1, activation='sigmoid'))
+    g.add(Reshape((train_generator.batch_size, 3, 64, 64))) # not sure if needed but we're doing channels_first; it helps as a sanity check when coding, at least!
     
-    gen = Model(inputs=input, outputs=g)
-    gen.summary()
-    return gen
+    return g
 
 gen = Generator()
 
+gen.initialize(ctx=ctx)
+
+gen.summary(nd.zeros((train_generator.batch_size,num_classes + NOISE)))
+
 if load_gen and os.path.isfile(load_gen):
-    gen.load_weights(load_gen)
+    gen.load_parameters(load_gen, ctx=ctx)
 else:
     print("not loading weights for generator")
 
+gen.hybridize()
 
 # _class is one-hot category array
 # randomized if None
 def gen_input(_class=None):
-    noise = nd.random.uniform(0.0, 1.0, NOISE)
+    noise = np.random.uniform(0.0, 1.0, NOISE)
     if type(_class) == type(None):
-        _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes) * 0.95
-    return nd.concatenate((_class, noise))
+        _class = nd.one_hot(random.randint(0, num_classes-2), num_classes)[0].asnumpy() * 0.95
+    return np.concatenate((_class, noise))
 
 def gen_input_rand():
     return gen_input()
@@ -298,9 +317,9 @@ def gen_input_rand():
 # optionally receives one-hot class array from training loop
 def gen_input_batch(classes=None):
     if type(classes) != type(None):
-        return nd.array([gen_input(cls) for cls in classes])
+        return nd.array(np.array([gen_input(cls) for cls in classes.asnumpy()]))
     print("!!! Generating random batch in gen_input_batch()!")
-    return nd.array([gen_input_rand() for x in range(train_generator.batch_size)])
+    return nd.array(np.array([gen_input_rand() for x in range(train_generator.batch_size)]))
 
 
 def render(all_out, filenum=0):            
@@ -313,10 +332,12 @@ def render(all_out, filenum=0):
     for i in range(min(swatches * swatches, len(all_out))):
         out = all_out[i]
         out = out.reshape(3, 64, 64)
-        out = nd.uint8(out * 255)
-        out = nd.moveaxis(out, 0, -1) # switch from channels_first to channels_last
+        out = out.asnumpy() * 255
+        out = np.uint8(out)
+        out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
         #print("check this: ")
         #print(out.shape)
+        print(out.shape)
         swatch = PIL.Image.fromarray(out)
         x = i % swatches
         y = math.floor(i/swatches)
@@ -330,17 +351,22 @@ def sample(filenum=0):
     classes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
     print(len(classes))
     _classidx=0
-    for i in range(5):
-        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+5)])
-        _classidx+=5
+    while _classidx < 25:
+        inp = gen_input_batch(nd.one_hot(nd.array([classes[x] % num_classes for x in range(_classidx,_classidx+train_generator.batch_size)]), num_classes) )
+        _classidx+=train_generator.batch_size
         print(inp.shape)
-        batch_out = gen.predict(inp)
+        batch_out = gen(inp)
+        #print(batch_out)
         print(batch_out.shape)
         for out in batch_out:
             all_out.append(out)
     render(all_out, filenum)
-            
-        
+
+### some instrumentation
+#render(train_generator.next()[0], -99)
+sample(0)
+train_generator.reset()
+exit()
 
 ###
 ### adversarial model
@@ -362,11 +388,6 @@ else:
     adver.compile(optimizer=Adam(), loss='kullback_leibler_divergence', metrics=METRICS, context=ctx)
     gen.compile(optimizer=Adam(), loss='kullback_leibler_divergence', metrics=METRICS, context=ctx)
 
-### some instrumentation
-#render(train_generator.next()[0], -99)
-sample(0)
-train_generator.reset()
-#exit()
 
 
 ###
