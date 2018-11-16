@@ -21,7 +21,7 @@ import PIL
 
 from scipy import ndimage
 
-ctx = mx.gpu() # not sure...
+ctx = mx.cpu() # not sure...
 
     
 EPOCHS = 5000
@@ -84,6 +84,12 @@ num_classes = train_generator.num_classes + 1 # number of image classes + fake
 ### D I S C R I M I N A T O R
 ###
 
+class Softmax(HybridBlock):
+    def __init__(self, **kwargs):
+         super(Softmax, self).__init__(**kwargs)
+
+    def hybrid_forward(self, F, x):
+        return F.softmax(x)
 
 class D_block(HybridBlock):
     def __init__(self, depth = 128, stride=1, maxpool=False, **kwargs):
@@ -184,17 +190,18 @@ def Discriminator():
     d.add(nn.BatchNorm())    
     
     d.add(nn.Dense(num_classes, weight_initializer=INIT))
-    #d.add(nn.Softmax())
+    d.add(Softmax())
         
     #discrim = Model(inputs=inp, outputs=d)    
-
+    #d.cast('float16')
+    
     return d
 
 discrim = Discriminator()
 
 discrim.initialize(ctx=ctx)
 
-discrim.summary(nd.zeros((train_generator.batch_size,3,64,64)))
+discrim.summary(nd.zeros((train_generator.batch_size,3,64,64), ctx=ctx))
 
 
 if load_disc and os.path.isfile(load_disc):
@@ -202,7 +209,7 @@ if load_disc and os.path.isfile(load_disc):
 else:
     print("not loading weights for discriminator")
 
-#discrim.hybridize()
+discrim.hybridize()
 trainerD = gluon.Trainer(discrim.collect_params(), 'RMSprop')
 
 #exit()
@@ -287,6 +294,7 @@ def Generator():
     
     g.add(nn.Conv2D(3, 1, activation='sigmoid'))
     g.add(Reshape((train_generator.batch_size, 3, 64, 64))) # not sure if needed but we're doing channels_first; it helps as a sanity check when coding, at least!
+    #g.cast('float16')
     
     return g
 
@@ -294,14 +302,14 @@ gen = Generator()
 
 gen.initialize(ctx=ctx)
 
-gen.summary(nd.zeros((train_generator.batch_size,num_classes + NOISE)))
+gen.summary(nd.zeros((train_generator.batch_size,num_classes + NOISE), ctx=ctx))
 
 if load_gen and os.path.isfile(load_gen):
     gen.load_parameters(load_gen, ctx=ctx)
 else:
     print("not loading weights for generator")
 
-#gen.hybridize()
+gen.hybridize()
 trainerG = gluon.Trainer(gen.collect_params(), 'RMSprop')
 
 # _class is one-hot category array
@@ -318,9 +326,9 @@ def gen_input_rand():
 # optionally receives one-hot class array from training loop
 def gen_input_batch(classes=None):
     if type(classes) != type(None):
-        return nd.array(np.array([gen_input(cls) for cls in classes.asnumpy()]))
+        return nd.array(np.array([gen_input(cls) for cls in classes.asnumpy()]), ctx=ctx)
     print("!!! Generating random batch in gen_input_batch()!")
-    return nd.array(np.array([gen_input_rand() for x in range(train_generator.batch_size)]))
+    return nd.array(np.array([gen_input_rand() for x in range(train_generator.batch_size)]), ctx=ctx)
 
 
 def render(all_out, filenum=0):            
@@ -353,7 +361,7 @@ def sample(filenum=0):
     print(len(classes))
     _classidx=0
     while _classidx < 25:
-        inp = gen_input_batch(nd.one_hot(nd.array([classes[x] % num_classes for x in range(_classidx,_classidx+train_generator.batch_size)]), num_classes) )
+        inp = gen_input_batch(nd.one_hot(nd.array([classes[x] % num_classes for x in range(_classidx,_classidx+train_generator.batch_size)], ctx=ctx), num_classes) )
         _classidx+=train_generator.batch_size
         print(inp.shape)
         batch_out = gen(inp)
@@ -400,7 +408,7 @@ def set_lr(model, newlr):
 ### T R A I N
 ###
 
-loss = mx.gluon.loss.HingeLoss()
+loss = mx.gluon.loss.SoftmaxCrossEntropyLoss()
 
 batches = math.floor(train_generator.n / train_generator.batch_size)
 
@@ -422,12 +430,12 @@ for epoch in range(start_epoch,EPOCHS+1):
         x,y = train_generator.next()
         if len(y) != train_generator.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
-        y = real_y = nd.one_hot(nd.array(y), num_classes)
+        y = real_y = nd.one_hot(nd.array(y, ctx=ctx), num_classes)
         #set_lr(discrim, disc_real_lr)
         
         with autograd.record():
             # real data loss
-            real_output = discrim(nd.array(x))
+            real_output = discrim(nd.array(x, ctx=ctx))
             errD_real = loss(real_output, real_y)
 
             #disc_real_lr = abs(min(1.0, d_loss[0])) * disc_start_lr
@@ -436,37 +444,38 @@ for epoch in range(start_epoch,EPOCHS+1):
             #half_y = real_y[math.floor(len(real_y)/2):]            
             x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
             fake_x = gen(x_gen_input)
-            y = nd.one_hot(nd.array([num_classes-1 for dummy in x]), num_classes) * 0.95
+            y = nd.one_hot(nd.array([num_classes-1 for dummy in x], ctx=ctx), num_classes) * 0.95
             #set_lr(discrim, disc_fake_lr)
-            fake_output = discrim(fake_x.detach()) # why detach()?
+            fake_output = discrim(fake_x) # why detach()?
             errD_fake = loss(fake_output, y)
             errD = (errD_real + errD_fake) * 0.5
-            #print("loss REAL: {}, FAKE: {}".format(errD_real.mean(), errD_fake.mean()))
             errD.backward()
 
             #x = gen_input_batch() 
         
         trainerD.step(train_generator.batch_size)
+        print("loss REAL: {}, FAKE: {}".format(errD_real.mean().asscalar(), errD_fake.mean().asscalar()))
         
         #y = np.array([inp[:num_classes] for inp in x])
         #set_lr(adver, adver_lr)
         with autograd.record():
+            fake_x = gen(x_gen_input)
             output = discrim(fake_x)
             errG = loss(output, real_y)
             #print("loss ADVR: {}".format(errG))
+            
             x_gen_input = gen_input_batch(real_y) # same classes, different noise
             fake_x = gen(x_gen_input)
-            #a_loss = adver.train_on_batch(x_gen_input, real_y)
             output = discrim(fake_x)
             errG2 = loss(output, real_y)
             #print("loss ADV2: {}".format(errG2))
             errG = (errG + errG2) * 0.5
             errG.backward()
-            #print("loss ADVR: mean {}".format(errG.mean()))
             #print("ADVR: a_loss %f, %s %f @ %d/%d\n" % (a_loss[0], adver.metrics_names[1], a_loss[1], batch_num, batches))
             #adver_lr = abs(min(2.0, a_loss[0])) * adver_start_lr
         
         trainerG.step(train_generator.batch_size)
+        print("loss ADVR: mean {}".format(errG.mean().asscalar()))
         
         end = timer()
         batches_timed += 1
@@ -477,6 +486,6 @@ for epoch in range(start_epoch,EPOCHS+1):
     sample(epoch)
     if epoch % 5 == 0:
         tag = tags[epoch % len(tags)]
-        gen.save(GEN_WEIGHTS.format(tag))
-        discrim.save(DISCRIM_WEIGHTS.format(tag))
+        gen.save_parameters(GEN_WEIGHTS.format(tag))
+        discrim.save_parameters(DISCRIM_WEIGHTS.format(tag))
     

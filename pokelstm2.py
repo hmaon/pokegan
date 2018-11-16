@@ -52,6 +52,7 @@ train_datagen = ImageDataGenerator(
         width_shift_range=0,
         height_shift_range=0,
         fill_mode='nearest',
+        data_format='channels_last',
         cval=255,
         horizontal_flip=False)
 
@@ -72,13 +73,13 @@ def gen_RNN():
     
     input = Input(batch_shape=(1,1,64*64*3 + num_classes) )
     
-    lstm = Concatenate()([Dense(16, activation='softmax', name='zoinks')(input), input])
+    lstm = Concatenate()([Dense(32, activation='elu', name='zoinks')(input), input])
     cells = []
     for i in range(2):
         cells.append(LSTMCell(256, recurrent_dropout=0.05, implementation=2, recurrent_initializer='glorot_normal'))
     lstm = RNN(cells, stateful=True, name="RNN_yoooo")(lstm)
     lstm = Dense(128, activation='tanh', name='jinkies')(lstm)
-    lstm = Dense(3, activation='sigmoid', name='yikes')(lstm)
+    lstm = Dense(3, activation='tanh', name='yikes')(lstm)
     lstm = Reshape((1,3,))(lstm)
     model = Model(inputs=input, outputs=lstm)
     
@@ -152,6 +153,7 @@ def sample(filenum=0):
 ###
 
 batches = math.floor(train_generator.n / train_generator.batch_size)
+seen = 0
 
 for epoch in range(start_epoch,EPOCHS+start_epoch):
     print("--- epoch %d ---" % (epoch,))
@@ -184,10 +186,13 @@ for epoch in range(start_epoch,EPOCHS+start_epoch):
                     partial[i:i+3] = a
                     #print("loss: {}".format(loss))            
             print("\nlosses {}, \nmean {}, median {}".format(losses, np.mean(losses), np.median(losses)))
+            seen += 1
+            print("{} images seen".format(seen))
+            if (seen % 5) == 0:
+                sample(seen)
         
     #train_generator.reset()
     lstm.save(weights_file(epoch))
-    sample(epoch)
     #if epoch % 5 == 0:
     #    gen.save('gen-weights-%d.hdf5' % (epoch,))
     
