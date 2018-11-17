@@ -5,9 +5,7 @@ import time
 #plaidml.keras.install_backend()
 
 import tensorflow as tf
-#tf.enable_eager_execution()
-
-
+tf.enable_eager_execution()
 
 from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import Dense, Activation, Flatten, Reshape
@@ -16,6 +14,7 @@ from tensorflow.keras.layers import LeakyReLU, Dropout, ReLU, PReLU
 from tensorflow.keras.layers import BatchNormalization
 from tensorflow.keras.layers import Softmax, Input, Concatenate, Add
 from tensorflow.train import AdamOptimizer, RMSPropOptimizer, ProximalAdagradOptimizer
+from tensorflow.contrib.opt import NadamOptimizer
 from tensorflow.keras.callbacks import ModelCheckpoint
 
 from tensorflow.keras import backend as K
@@ -34,11 +33,11 @@ from scipy import ndimage
 
 from tensorflow.keras.backend import set_session
 config = tf.ConfigProto()
-config.gpu_options.per_process_gpu_memory_fraction = 0.7
+config.gpu_options.per_process_gpu_memory_fraction = 0.8
 config.gpu_options.allow_growth = True
 config.gpu_options.visible_device_list = "0"
-#session = tf.Session(config=config)
-set_session(tf.Session(config=config))
+session = tf.Session(config=config)
+set_session(session)
 
 ctx = None
     
@@ -92,6 +91,7 @@ train_datagen = ImageDataGenerator(
         rescale=1./255,
         width_shift_range=3,
         height_shift_range=3,
+        shear_range=5,
         fill_mode='nearest',
         cval=255,
         horizontal_flip=False,
@@ -100,7 +100,7 @@ train_datagen = ImageDataGenerator(
 train_generator = train_datagen.flow_from_directory(
         './dir_per_class',
         target_size=(64, 64),
-        batch_size=60,
+        batch_size=25,
         class_mode='sparse',
         interpolation='lanczos')
 
@@ -181,26 +181,28 @@ def Discriminator():
     e = MaxPooling2D()(d)
     e = Flatten()(e)
     
-    d = Conv2D(512, 1, kernel_initializer=INIT)(d) 
-    d = PReLU()(d)
-    d = BatchNormalization()(d)
-    
+    d = Conv2D(512, 2, kernel_initializer=INIT)(d)    
     d = Flatten()(d)
+
     d = Concatenate()([d,e])
 
+    d = PReLU()(d)
+    d = BatchNormalization()(d)
+
+    
     # classify ??
     d = Dense(512, kernel_initializer=INIT)(d)
     d = Dropout(dense_dropout)(d)
     d = PReLU()(d)
     d = BatchNormalization()(d)
     
-    d = Dense(512, kernel_initializer=INIT)(d)
-    d = Dropout(dense_dropout)(d)
-    d = PReLU()(d)
-    d = BatchNormalization()(d)    
+    #d = Dense(512, kernel_initializer=INIT)(d)
+    #d = Dropout(dense_dropout)(d)
+    #d = PReLU()(d)
+    #d = BatchNormalization()(d)    
     
     d = Dense(num_classes, kernel_initializer=INIT)(d)
-    d = Softmax()(d)
+    #d = Softmax()(d) # calculated in softmax_cross_entropy()
         
     discrim = Model(inputs=inp, outputs=d)    
 
@@ -215,7 +217,10 @@ if load_disc and os.path.isfile(load_disc):
 else:
     print("not loading weights for discriminator")
 
-discrim.compile(optimizer=RMSPropOptimizer(learning_rate=0.001), loss='kullback_leibler_divergence', metrics=METRICS)
+#discrim.compile(optimizer=RMSPropOptimizer(learning_rate=0.001), loss='kullback_leibler_divergence', metrics=METRICS)
+discrim.call = tf.contrib.eager.defun(discrim.call)
+#discrim_optimizer = RMSPropOptimizer(learning_rate=0.01)    
+discrim_optimizer = NadamOptimizer(learning_rate=0.0002)    
 
 ###
 ### G E N E R A T O R
@@ -235,9 +240,9 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True):
     #conv = PReLU()(conv)     
     #conv = BatchNormalization()(conv)    
 
-    #conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
-    #conv = PReLU()(conv)  
-    #conv = BatchNormalization()(conv)    
+    conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
+    conv = PReLU()(conv)  
+    conv = BatchNormalization()(conv)    
     
     return conv
     
@@ -293,24 +298,29 @@ if load_gen and os.path.isfile(load_gen):
 else:
     print("not loading weights for generator")
 
+#gen.compile(optimizer=RMSPropOptimizer(learning_rate=0.002), loss='kullback_leibler_divergence', metrics=METRICS)
+gen.call = tf.contrib.eager.defun(gen.call)
+#gen_optimizer = RMSPropOptimizer(learning_rate=0.005)
+gen_optimizer = AdamOptimizer(learning_rate=0.001)
+    
 
 # _class is one-hot category array
 # randomized if None
-def gen_input(_class=None):
-    noise = np.random.uniform(0.0, 1.0, NOISE)
+def gen_input(_class=None, clipping=1.0):
+    noise = np.random.uniform(0.0, clipping, NOISE)
     if type(_class) == type(None):
         _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes) * 0.95
     return np.concatenate((_class, noise))
 
-def gen_input_rand():
-    return gen_input()
+def gen_input_rand(clipping=1.0):
+    return gen_input(clipping)
 
 # optionally receives one-hot class array from training loop
-def gen_input_batch(classes=None):
+def gen_input_batch(classes=None, clipping=1.0):
     if type(classes) != type(None):
-        return np.array([gen_input(cls) for cls in classes])
+        return np.array([gen_input(cls, clipping) for cls in classes], dtype=np.float32)
     print("!!! Generating random batch in gen_input_batch()!")
-    return np.array([gen_input_rand() for x in range(train_generator.batch_size)])
+    return np.array([gen_input_rand(clipping) for x in range(train_generator.batch_size)], dtype=np.float32)
 
 
 def render(all_out, filenum=0):            
@@ -341,7 +351,7 @@ def sample(filenum=0):
     print(len(classes))
     _classidx=0
     for i in range(5):
-        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+5)])
+        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+5)], clipping=0.5)
         _classidx+=5
         print(inp.shape)
         batch_out = gen.predict(inp)
@@ -358,15 +368,14 @@ def sample(filenum=0):
 #for layer in discrim.layers:
 #    layer.trainable = False
 
-discrim.trainable = False
+#discrim.trainable = False
 
-adver = Sequential()
-adver.add(gen)
-adver.add(discrim)
-adver.summary()
+#adver = Sequential()
+#adver.add(gen)
+#adver.add(discrim)
+#adver.summary()
 
-adver.compile(optimizer=RMSPropOptimizer(learning_rate=0.001), loss='kullback_leibler_divergence', metrics=METRICS) 
-gen.compile(optimizer=RMSPropOptimizer(learning_rate=0.001), loss='kullback_leibler_divergence', metrics=METRICS)
+#adver.compile(optimizer=RMSPropOptimizer(learning_rate=0.002), loss='kullback_leibler_divergence', metrics=METRICS) 
 
 ### some instrumentation
 #render(train_generator.next()[0], -99)
@@ -393,49 +402,55 @@ def set_lr(model, newlr):
 
 batches = math.floor(train_generator.n / train_generator.batch_size)
 
-disc_start_lr = get_lr(discrim)
-disc_real_lr = get_lr(discrim)
-disc_fake_lr = get_lr(discrim)
-
-adver_start_lr = get_lr(adver)
-adver_lr = get_lr(adver)
-
 batches_timed = 0
 total_time = 0
+
 
 for epoch in range(start_epoch,EPOCHS+1):
     print("--- epoch %d ---" % (epoch,))
     for batch_num in range(batches):
         start = timer()
+        
         # get real data
         x,y = train_generator.next()
         if len(y) != train_generator.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
-        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.95 for cls in y])
-        set_lr(discrim, disc_real_lr)
-        d_loss = discrim.train_on_batch(x, y)
-        print("REAL: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
-        disc_real_lr = abs(min(1.0, d_loss[0])) * disc_start_lr
+        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=np.float32)
+        all_fake_y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=np.float32)
         
-        # get fake data
-        #half_y = real_y[math.floor(len(real_y)/2):]
-        x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
-        x = gen.predict(x_gen_input)
-        y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.95 for dummy in x])
-        set_lr(discrim, disc_fake_lr)
-        d_loss = discrim.train_on_batch(x, y)         
-        print("FAKE: d_loss %f, %s %f " % (d_loss[0], discrim.metrics_names[1], d_loss[1]))
-        disc_fake_lr = abs(min(1.0, d_loss[0])) * disc_start_lr
+        #set_lr(discrim, disc_real_lr)
         
-        #x = gen_input_batch() 
-        #y = np.array([inp[:num_classes] for inp in x])
-        set_lr(adver, adver_lr)
-        a_loss = adver.train_on_batch(x_gen_input, real_y)
-        print("ADVR: a_loss %f, %s %f " % (a_loss[0], adver.metrics_names[1], a_loss[1]))
-        x_gen_input = gen_input_batch(real_y) # same classes, different noise
-        a_loss = adver.train_on_batch(x_gen_input, real_y)
-        print("ADVR: a_loss %f, %s %f @ %d/%d\n" % (a_loss[0], adver.metrics_names[1], a_loss[1], batch_num, batches))
-        adver_lr = abs(min(2.0, a_loss[0])) * adver_start_lr
+        with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
+            x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
+            gen_x = gen(x_gen_input, training=True)
+
+            real_out = discrim(x, training=True)
+            d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
+            gen_out = discrim(gen_x, training=True)
+            y = all_fake_y
+            d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
+            
+            d_loss = d_loss_real + d_loss_fake
+            #d_loss *= 0.5
+            g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
+            
+            x_gen_input = gen_input_batch(real_y) # same classes, different noise
+            gen_x = gen(x_gen_input, training=True)
+            gen_out = discrim(gen_x, training=True)
+            g_loss += tf.losses.softmax_cross_entropy(real_y, gen_out)
+            #g_loss *= 0.5
+
+            
+        gradients_of_generator = gen_tape.gradient(g_loss, gen.variables)
+        gradients_of_discriminator = disc_tape.gradient(d_loss, discrim.variables)
+
+        gen_optimizer.apply_gradients(zip(gradients_of_generator, gen.variables))
+        discrim_optimizer.apply_gradients(zip(gradients_of_discriminator, discrim.variables))
+
+        print("REAL: {}".format((d_loss_real)))
+        print("FAKE: {}".format((d_loss_fake)))
+        print("G_LOSS: {}".format((g_loss)))
+
         end = timer()
         batches_timed += 1
         total_time += (end - start)
