@@ -1,14 +1,17 @@
 import numpy as np
 import time
 
-#import plaidml.keras
-#plaidml.keras.install_backend()
+
+# TODO:
+# * implement tf.train.Checkpoint
+# * float16 ops
+# * implement stabilization from Roth et al. (2017) https://arxiv.org/abs/1705.09367
 
 import tensorflow as tf
 tf.enable_eager_execution()
 
 from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import Dense, Activation, Flatten, Reshape
+from tensorflow.keras.layers import Dense, Activation, Flatten, Reshape, GaussianNoise
 from tensorflow.keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, SeparableConv2D, MaxPool2D, AveragePooling2D, MaxPooling2D
 from tensorflow.keras.layers import LeakyReLU, Dropout, ReLU, PReLU
 from tensorflow.keras.layers import BatchNormalization
@@ -53,7 +56,7 @@ EPOCHS = 5000
 
 METRICS=[keras.metrics.categorical_accuracy]
 
-INIT='glorot_normal'
+INIT=tf.orthogonal_initializer()
 
 GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
@@ -87,6 +90,8 @@ def rangeshift(inp):
     #print(inp)
     return inp
 
+batch_size = 23    
+    
 train_datagen = ImageDataGenerator(
         rescale=1./255,
         width_shift_range=3,
@@ -100,7 +105,7 @@ train_datagen = ImageDataGenerator(
 train_generator = train_datagen.flow_from_directory(
         './dir_per_class',
         target_size=(64, 64),
-        batch_size=25,
+        batch_size=batch_size,
         class_mode='sparse',
         interpolation='lanczos')
 
@@ -113,14 +118,14 @@ num_classes = train_generator.num_classes + 1 # pokemon + fake
 def d_block(dtensor, depth = 128, stride=1, maxpool=False):
 
     # feature detection
-    dtensor = SeparableConv2D(depth, 3, strides=1,\
+    dtensor = Conv2D(depth, 3, strides=1,\
                               padding='same',\
                               kernel_initializer=INIT)(dtensor)
     dtensor = PReLU()(dtensor)
     dtensor = BatchNormalization()(dtensor)
     
     # strided higher level feature detection
-    dtensor = SeparableConv2D(depth, 3, strides=stride,\
+    dtensor = Conv2D(depth, 3, strides=stride,\
                               padding='same',\
                               kernel_initializer=INIT)(dtensor)
     dtensor = PReLU()(dtensor)
@@ -158,17 +163,20 @@ def res_d_block(dtensor, depth, stride = 1):
     return Add()([conv, short])
     
 def Discriminator():
-    dense_dropout = 0.05
+    dense_dropout = 0.1
     
     inp = Input((3,64,64))
     
     
-    # fine feature discrimation in two full conv layers?
-    d = SeparableConv2D(32, 5, padding='same', input_shape=(3,64,64), kernel_initializer=INIT)(inp)
+    d = GaussianNoise(0.4)(inp)
+    
+    d = inp
+    
+    d = Conv2D(32, 5, padding='same', input_shape=(3,64,64), kernel_initializer=INIT)(d)
     BatchNormalization()(d)
     PReLU()(d)
     
-    d = SeparableConv2D(64, 3, padding='same', kernel_initializer=INIT, strides=2)(d)
+    d = Conv2D(64, 3, padding='same', kernel_initializer=INIT, strides=2)(d)
     BatchNormalization()(d)
     PReLU()(d)
     
@@ -178,23 +186,17 @@ def Discriminator():
     d = d_block(d, 512, 2) # 4x4
     d = d_block(d, 512, 2) # 2x2
     
-    e = MaxPooling2D()(d)
-    e = Flatten()(e)
-    
-    d = Conv2D(512, 2, kernel_initializer=INIT)(d)    
+    d = Conv2D(512, 2, kernel_initializer=INIT, strides = 2)(d) 
     d = Flatten()(d)
-
-    d = Concatenate()([d,e])
 
     d = PReLU()(d)
     d = BatchNormalization()(d)
-
     
     # classify ??
     d = Dense(512, kernel_initializer=INIT)(d)
-    d = Dropout(dense_dropout)(d)
     d = PReLU()(d)
     d = BatchNormalization()(d)
+    d = Dropout(dense_dropout)(d)
     
     #d = Dense(512, kernel_initializer=INIT)(d)
     #d = Dropout(dense_dropout)(d)
@@ -220,29 +222,60 @@ else:
 #discrim.compile(optimizer=RMSPropOptimizer(learning_rate=0.001), loss='kullback_leibler_divergence', metrics=METRICS)
 discrim.call = tf.contrib.eager.defun(discrim.call)
 #discrim_optimizer = RMSPropOptimizer(learning_rate=0.01)    
-discrim_optimizer = NadamOptimizer(learning_rate=0.0002)    
+discrim_optimizer = AdamOptimizer(learning_rate=0.0002)
+
+# from https://github.com/rothk/Stabilizing_GANs
+# D1 = disc_real, D2 = disc_fake
+def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
+    D1 = tf.nn.sigmoid(D1_logits)
+    D2 = tf.nn.sigmoid(D2_logits)
+
+    if tape:
+        # eager version
+        with tape.stop_recording():
+            grad_D1_logits = tape.gradient(D1_logits, D1_arg)#[0]
+            #print(grad_D1_logits.shape)
+            #grad_D1_logits = grad_D1_logits[0]
+            #print(grad_D1_logits.shape)
+            grad_D2_logits = tape.gradient(D2_logits, D2_arg)#[0]
+    else:
+        grad_D1_logits = tf.gradients(D1_logits, D1_arg)[0]
+        grad_D2_logits = tf.gradients(D2_logits, D2_arg)[0]
+    grad_D1_logits_norm = tf.norm(tf.reshape(grad_D1_logits, [batch_size,-1]), axis=1, keep_dims=True)
+    grad_D2_logits_norm = tf.norm(tf.reshape(grad_D2_logits, [batch_size,-1]), axis=1, keep_dims=True)
+
+    print("{} vs {}".format(grad_D1_logits_norm.shape, D1.shape))
+    #set keep_dims=True/False such that grad_D_logits_norm.shape == D.shape
+    assert grad_D1_logits_norm.shape == D1.shape
+    assert grad_D2_logits_norm.shape == D2.shape
+
+    reg_D1 = tf.multiply(tf.square(1.0-D1), tf.square(grad_D1_logits_norm))
+    reg_D2 = tf.multiply(tf.square(D2), tf.square(grad_D2_logits_norm))
+    disc_regularizer = tf.reduce_mean(reg_D1 + reg_D2)
+    return disc_regularizer
 
 ###
 ### G E N E R A T O R
 ###
 
-def g_block(gtensor, depth=32, stride=1, size=3, upsample=True):
+def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=True):
     conv = gtensor
     if upsample: 
         conv = UpSampling2D()(conv)
-
+    
+    if deconvolve:
+        conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT)(conv)
+        conv = PReLU()(conv)     
+        conv = BatchNormalization()(conv)    
+        
     #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
     conv = Conv2D(depth, 3, padding='same', kernel_initializer=INIT)(conv)
     conv = PReLU()(conv)  
-    conv = BatchNormalization()(conv)
-        
-    #conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT)(conv)
-    #conv = PReLU()(conv)     
-    #conv = BatchNormalization()(conv)    
+    conv = BatchNormalization()(conv)        
 
-    conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
-    conv = PReLU()(conv)  
-    conv = BatchNormalization()(conv)    
+    #conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
+    #conv = PReLU()(conv)  
+    #conv = BatchNormalization()(conv)    
     
     return conv
     
@@ -260,17 +293,17 @@ def Generator():
     
     g = Reshape(target_shape=(512,4,4))(g)
 
-    g = g_block(g, 512, 2, upsample=True) # 8x8
+    g = g_block(g, 512, 2, upsample=False) # 8x8
     
-    g = g_block(g, 256, 2, upsample=True) # 16x16
+    g = g_block(g, 256, 2, upsample=False) # 16x16
     
-    g = g_block(g, 128, 2, size=5, upsample=True)  # 32x32
+    g = g_block(g, 128, 2, upsample=False)  # 32x32
     
-    g = g_block(g, 64, 2, size=5, upsample=True) # 64x64
+    g = g_block(g, 64, 2, upsample=False) # 64x64
 
     # I don't know what these are supposed to do but whatever:
     
-    g = g_block(g, 64, 1, size=3, upsample=False) # 64x64
+    g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
     
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
     #g = PReLU()(g)
@@ -301,7 +334,7 @@ else:
 #gen.compile(optimizer=RMSPropOptimizer(learning_rate=0.002), loss='kullback_leibler_divergence', metrics=METRICS)
 gen.call = tf.contrib.eager.defun(gen.call)
 #gen_optimizer = RMSPropOptimizer(learning_rate=0.005)
-gen_optimizer = AdamOptimizer(learning_rate=0.001)
+gen_optimizer = AdamOptimizer(learning_rate=0.0005)
     
 
 # _class is one-hot category array
@@ -320,9 +353,26 @@ def gen_input_batch(classes=None, clipping=1.0):
     if type(classes) != type(None):
         return np.array([gen_input(cls, clipping) for cls in classes], dtype=np.float32)
     print("!!! Generating random batch in gen_input_batch()!")
-    return np.array([gen_input_rand(clipping) for x in range(train_generator.batch_size)], dtype=np.float32)
+    return np.array([gen_input_rand(clipping) for x in range(batch_size)], dtype=np.float32)
 
+def img_float_to_uint8(img, do_reshape=True):
+    out = img
+    if do_reshape: out = out.reshape(3, 64, 64)
+    out = np.uint8(out * 255)
+    return out
+    
+def img_uint8_to_float(img):
+    img = np.float32(img)
+    img *= 1./255
+    return img
 
+def img_quantize(img): # img is a Tensor 
+    g = img
+    g = tf.math.multiply(tf.constant(255.), g)
+    #g = tf.math.floor(g) # quantize
+    g = tf.math.multiply(tf.constant(1./255), g)            
+    return g
+    
 def render(all_out, filenum=0):            
     pad = 3
     swatchdim = 64 # 64x64 is the output of the generator
@@ -332,8 +382,7 @@ def render(all_out, filenum=0):
 
     for i in range(min(swatches * swatches, len(all_out))):
         out = all_out[i]
-        out = out.reshape(3, 64, 64)
-        out = np.uint8(out * 255)
+        out = img_float_to_uint8(out)
         out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
         #print("check this: ")
         #print(out.shape)
@@ -405,6 +454,14 @@ batches = math.floor(train_generator.n / train_generator.batch_size)
 batches_timed = 0
 total_time = 0
 
+# for https://github.com/rothk/Stabilizing_GANs regularizer; 0.1 is a value they used without annealing in one of their examples 
+gamma = 0.1
+
+def apply_gradients(gradients_of_generator, gen, gradients_of_discriminator, discrim):
+    gen_optimizer.apply_gradients(zip(gradients_of_generator, gen.variables))
+    discrim_optimizer.apply_gradients(zip(gradients_of_discriminator, discrim.variables))
+
+apply_gradients = tf.contrib.eager.defun(apply_gradients)    
 
 for epoch in range(start_epoch,EPOCHS+1):
     print("--- epoch %d ---" % (epoch,))
@@ -413,6 +470,7 @@ for epoch in range(start_epoch,EPOCHS+1):
         
         # get real data
         x,y = train_generator.next()
+        x = tf.convert_to_tensor(x)
         if len(y) != train_generator.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
         y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=np.float32)
@@ -420,7 +478,8 @@ for epoch in range(start_epoch,EPOCHS+1):
         
         #set_lr(discrim, disc_real_lr)
         
-        with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
+        with tf.GradientTape(persistent=True) as tape:
+            #tape.watch(x)
             x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
             gen_x = gen(x_gen_input, training=True)
 
@@ -432,6 +491,11 @@ for epoch in range(start_epoch,EPOCHS+1):
             
             d_loss = d_loss_real + d_loss_fake
             #d_loss *= 0.5
+            
+            # call regularizer from https://github.com/rothk/Stabilizing_GANs
+            #disc_reg = Discriminator_Regularizer(real_out, x, gen_out, gen_x, tape)
+            #d_loss += (gamma/2.0)*disc_reg
+            
             g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
             
             x_gen_input = gen_input_batch(real_y) # same classes, different noise
@@ -441,14 +505,16 @@ for epoch in range(start_epoch,EPOCHS+1):
             #g_loss *= 0.5
 
             
-        gradients_of_generator = gen_tape.gradient(g_loss, gen.variables)
-        gradients_of_discriminator = disc_tape.gradient(d_loss, discrim.variables)
+        gradients_of_generator = tape.gradient(g_loss, gen.variables)
+        #gradients_of_generator = tf.gradients(g_loss, gen.variables)
+        gradients_of_discriminator = tape.gradient(d_loss, discrim.variables)
+        #gradients_of_discriminator = tf.gradients(d_loss, discrim.variables)        
 
-        gen_optimizer.apply_gradients(zip(gradients_of_generator, gen.variables))
-        discrim_optimizer.apply_gradients(zip(gradients_of_discriminator, discrim.variables))
+        apply_gradients(gradients_of_generator, gen, gradients_of_discriminator, discrim)
 
         print("REAL: {}".format((d_loss_real)))
         print("FAKE: {}".format((d_loss_fake)))
+        print("REGULARIZED d_loss: {}".format((d_loss)))
         print("G_LOSS: {}".format((g_loss)))
 
         end = timer()
