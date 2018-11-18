@@ -34,9 +34,21 @@ import PIL
 
 from scipy import ndimage
 
+FLAGS = tf.app.flags.FLAGS
+
+# Basic model parameters.
+tf.app.flags.DEFINE_integer('batch_size', 20,
+                            """Number of images to process in a batch.""")
+tf.app.flags.DEFINE_string('data_dir', 'data',
+                           """Path to the BBBC006 data directory.""")
+tf.app.flags.DEFINE_boolean('use_fp16', False,
+                            """Train the model using fp16.""")
+tf.app.flags.DEFINE_float('gpu_memory_fraction', 0.8,
+                            """Fraction of GPU memory to reserve; 1.0 may crash the OS window manager.""")
+                            
 from tensorflow.keras.backend import set_session
 config = tf.ConfigProto()
-config.gpu_options.per_process_gpu_memory_fraction = 0.8
+config.gpu_options.per_process_gpu_memory_fraction = FLAGS.gpu_memory_fraction
 config.gpu_options.allow_growth = True
 config.gpu_options.visible_device_list = "0"
 session = tf.Session(config=config)
@@ -54,7 +66,7 @@ if 'mxnet' == K.backend():
     
 EPOCHS = 5000
 
-METRICS=[keras.metrics.categorical_accuracy]
+#METRICS=[keras.metrics.categorical_accuracy]
 
 INIT=tf.orthogonal_initializer()
 
@@ -115,7 +127,7 @@ num_classes = train_generator.num_classes + 1 # pokemon + fake
 ### D I S C R I M I N A T O R
 ###
 
-def d_block(dtensor, depth = 128, stride=1, maxpool=False):
+def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='valid'):
 
     # feature detection
     dtensor = Conv2D(depth, 3, strides=1,\
@@ -126,7 +138,7 @@ def d_block(dtensor, depth = 128, stride=1, maxpool=False):
     
     # strided higher level feature detection
     dtensor = Conv2D(depth, 3, strides=stride,\
-                              padding='same',\
+                              padding=stridedPadding,\
                               kernel_initializer=INIT)(dtensor)
     dtensor = PReLU()(dtensor)
     dtensor = BatchNormalization()(dtensor)
@@ -165,26 +177,25 @@ def res_d_block(dtensor, depth, stride = 1):
 def Discriminator():
     dense_dropout = 0.1
     
-    inp = Input((3,64,64))
-    
+    inp = Input((3,64,64))    
     
     d = GaussianNoise(0.4)(inp)
     
     d = inp
     
-    d = Conv2D(32, 5, padding='same', input_shape=(3,64,64), kernel_initializer=INIT)(d)
+    d = Conv2D(32, 3, padding='valid', input_shape=(3,64,64), kernel_initializer=INIT)(d) # 62x62
     BatchNormalization()(d)
     PReLU()(d)
     
-    d = Conv2D(64, 3, padding='same', kernel_initializer=INIT, strides=2)(d)
+    d = Conv2D(64, 3, padding='valid', kernel_initializer=INIT, strides=2)(d) # 30x30
     BatchNormalization()(d)
     PReLU()(d)
-    
-    # 32x32 here
-    d = d_block(d, 256, 2) # 16x16
-    d = d_block(d, 512, 2) # 8x8
-    d = d_block(d, 512, 2) # 4x4
+       
+       
+    d = d_block(d, 256, 2) # 14x14
+    d = d_block(d, 512, 2) # 6x6
     d = d_block(d, 512, 2) # 2x2
+    #d = d_block(d, 512, 2) # 2x2
     
     d = Conv2D(512, 2, kernel_initializer=INIT, strides = 2)(d) 
     d = Flatten()(d)
