@@ -43,7 +43,7 @@ tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
 tf.app.flags.DEFINE_boolean('use_fp16', False,
                             """Train the model using fp16. [XXX NOT WORKING]""")
-tf.app.flags.DEFINE_float('gpu_memory_fraction', 0.8,
+tf.app.flags.DEFINE_float('gpu_memory_fraction', 0.85,
                             """Fraction of GPU memory to reserve; 1.0 may crash the OS window manager.""")
 tf.app.flags.DEFINE_integer('epoch', 1,
                             """Epoch number of last checkpoint for continuation! (e.g., number of last screenshot)""")
@@ -60,8 +60,12 @@ session = tf.Session(config=config)
 set_session(session)
 
 ctx = None
-   
 
+save_path = 'summary/'
+
+global_step = tf.train.create_global_step()
+writer = tf.contrib.summary.create_file_writer(save_path)
+        
 #keras.backend.set_floatx('float16')
     
 EPOCHS = 5000
@@ -180,7 +184,7 @@ def Discriminator():
     
     inp = Input((3,64,64))    
     
-    #d = GaussianNoise(0.4)(inp)
+    d = GaussianNoise(0.1)(inp)
     
     d = inp
     
@@ -239,16 +243,18 @@ discrim_optimizer = AdamOptimizer(learning_rate=0.0002)
 # from https://github.com/rothk/Stabilizing_GANs
 # D1 = disc_real, D2 = disc_fake
 def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
-    D1 = tf.nn.sigmoid(D1_logits)
-    D2 = tf.nn.sigmoid(D2_logits)
+    #D1 = tf.nn.sigmoid(D1_logits)
+    #D2 = tf.nn.sigmoid(D2_logits)
+    D1 = tf.nn.softmax(D1_logits)
+    D2 = tf.nn.softmax(D2_logits)
 
     # convnert real real to max probability of any real sample
     D1 = D1[:,:-1]
     D1 = tf.convert_to_tensor([(max(x),) for x in D1], dtype=dtype)
     
     # convert fake prediction 1 - probability of fakeness
-    #D2 = 1 - D2[:,-1:]
-    D2 = D2[:,-1:]
+    D2 = 1 - D2[:,-1:]
+    #D2 = D2[:,-1:]
     # or not? it doesn't work and I don't get why yet
     
     #print("D1 = {}, D2 = {}".format(D1, D2))
@@ -320,13 +326,13 @@ def Generator():
     
     g = Reshape(target_shape=(512,4,4))(g)
 
-    g = g_block(g, 512, 2, upsample=False) # 8x8
+    g = g_block(g, 1024, 2, upsample=False) # 8x8
     
-    g = g_block(g, 256, 2, upsample=False) # 16x16
+    g = g_block(g, 512, 2, upsample=False) # 16x16
     
-    g = g_block(g, 128, 2, upsample=False)  # 32x32
+    g = g_block(g, 256, 2, upsample=False)  # 32x32
     
-    g = g_block(g, 64, 2, upsample=False) # 64x64
+    g = g_block(g, 128, 2, upsample=False) # 64x64
 
     # I don't know what these are supposed to do but whatever:
     
@@ -420,6 +426,12 @@ def render(all_out, filenum=0):
         img.paste(swatch, (x * (pad+swatchdim), y * (pad+swatchdim)))
 
     img.save('out%d.png' %(filenum,))
+    #ima = np.array(img).flatten()
+    #ima = ima[:batch_size*swatchdim*swatchdim*3]
+    #print("ima.shape: {}".format(ima.shape))
+    #with writer.as_default():
+    #    with tf.contrib.summary.always_record_summaries():
+    #        tf.contrib.summary.image("sample", ima.reshape((batch_size,swatchdim,swatchdim,3)))
     
 def sample(filenum=0):
     all_out = []
@@ -459,7 +471,6 @@ sample(0)
 train_generator.reset()
 #exit()
 
-
 ###
 ### ugh
 ###
@@ -490,6 +501,7 @@ def apply_gradients(gradients_of_generator, gen, gradients_of_discriminator, dis
 
 apply_gradients = tf.contrib.eager.defun(apply_gradients)    
 
+
 for epoch in range(start_epoch,EPOCHS+1):
     print("--- epoch %d ---" % (epoch,))
     for batch_num in range(batches):
@@ -506,33 +518,42 @@ for epoch in range(start_epoch,EPOCHS+1):
         #set_lr(discrim, disc_real_lr)
         
         with tf.GradientTape(persistent=True) as tape:
-            tape.watch(x)
+            #tape.watch(x)
             x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
             gen_x = gen(x_gen_input, training=True)
 
             real_out = discrim(x, training=True)
             #d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
-            d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
+            #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
+            d_loss_real = tf.losses.hinge_loss(labels=y, logits=tf.nn.softmax(real_out))
+            d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(y, real_out))
+            
             gen_out = discrim(gen_x, training=True)
             y = all_fake_y
             #d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
-            d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
-            d_loss = tf.reduce_mean(d_loss_real + d_loss_fake)
+            #d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
+            d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=tf.nn.softmax(gen_out))
+            d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, gen_out))
+            
+            d_loss = tf.reduce_mean(d_loss_real) + tf.reduce_mean(d_loss_fake)
+            #d_loss = tf.reduce_mean(d_loss_real + d_loss_fake)
             #d_loss *= 0.5
             
             # call regularizer from https://github.com/rothk/Stabilizing_GANs
-            disc_reg = Discriminator_Regularizer(real_out, x, gen_out, gen_x, tape)
-            disc_reg = (gamma/2.0)*disc_reg
-            d_loss += disc_reg
+            #disc_reg = Discriminator_Regularizer(real_out, x, gen_out, gen_x, tape)
+            #disc_reg = (gamma/2.0)*disc_reg
+            #d_loss += disc_reg
             
             #g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
-            g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
+            #g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
+            g_loss = tf.losses.hinge_loss(labels=real_y, logits=tf.nn.softmax(gen_out))        
+            g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, gen_out))
             
-            x_gen_input = gen_input_batch(real_y) # same classes, different noise
-            gen_x = gen(x_gen_input, training=True)
-            gen_out = discrim(gen_x, training=True)
+            #x_gen_input = gen_input_batch(real_y) # same classes, different noise
+            #gen_x = gen(x_gen_input, training=True)
+            #gen_out = discrim(gen_x, training=True)
             #g_loss += tf.losses.softmax_cross_entropy(real_y, gen_out)
-            g_loss += tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
+            #g_loss += tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
             g_loss = tf.reduce_mean(g_loss)
             #g_loss *= 0.5
 
@@ -544,15 +565,31 @@ for epoch in range(start_epoch,EPOCHS+1):
 
         apply_gradients(gradients_of_generator, gen, gradients_of_discriminator, discrim)
 
-        print("REAL: {}".format(tf.reduce_mean(d_loss_real)))
-        print("FAKE: {}".format(tf.reduce_mean(d_loss_fake)))
-        print("final d_loss: {}, regularizer delta: {}".format((d_loss), disc_reg))
-        print("G_LOSS: {}".format((g_loss)))
-
+        
         end = timer()
         batches_timed += 1
         total_time += (end - start)
-        print("batch time: {}, total_time: {}, mean time: {}\n".format(end-start, total_time, total_time / batches_timed))
+        
+        d_loss_real = tf.reduce_mean(d_loss_real)
+        d_loss_fake = tf.reduce_mean(d_loss_fake)
+        with writer.as_default():
+            with tf.contrib.summary.always_record_summaries():
+                tf.contrib.summary.scalar("d_loss_real", d_loss_real)
+                tf.contrib.summary.scalar("d_accuracy_real", d_acc_real/batch_size)
+                tf.contrib.summary.scalar("d_loss_fake", d_loss_fake)
+                tf.contrib.summary.scalar("d_accuracy_fake", d_acc_fake/batch_size)
+                tf.contrib.summary.scalar("g_loss", g_loss)
+                tf.contrib.summary.scalar("g_accuracy", g_acc/batch_size)
+                tf.contrib.summary.histogram("g_grads?", gradients_of_generator[0]) 
+        
+        writer.flush()
+        
+        print("REAL: {:.3f}, acc: {:.3f}".format(d_loss_real, d_acc_real/batch_size))
+        print("FAKE: {:.3f}, acc: {:.3f}".format(d_loss_fake, d_acc_fake/batch_size))
+        #print("final d_loss: {}, regularizer delta: {}".format((d_loss), disc_reg))
+        print("G_LOSS: {:.3f}, acc: {:.3f}".format((g_loss), g_acc/batch_size))
+        #print("mean d grads: {:.8f}, mean g grads: {:.8f}".format(tf.reduce_mean(gradients_of_generator), tf.reduce_mean(gradients_of_discriminator)))
+        print("batch time: {:.3f}, total_time: {:.3f}, mean time: {:.3f}\n".format(end-start, total_time, total_time / batches_timed))
         
     #train_generator.reset()
     sample(epoch)
