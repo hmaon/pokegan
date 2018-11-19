@@ -37,7 +37,7 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 20,
+tf.app.flags.DEFINE_integer('batch_size', 19,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
@@ -525,14 +525,16 @@ for epoch in range(start_epoch,EPOCHS+1):
             real_out = discrim(x, training=True)
             #d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
             #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
-            d_loss_real = tf.losses.hinge_loss(labels=y, logits=tf.nn.softmax(real_out))
+            d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out)
+            d_loss_real *= d_loss_real # square hinge
             d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(y, real_out))
             
             gen_out = discrim(gen_x, training=True)
             y = all_fake_y
             #d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
             #d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
-            d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=tf.nn.softmax(gen_out))
+            d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out)
+            d_loss_fake *= d_loss_fake # square hinge
             d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, gen_out))
             
             d_loss = tf.reduce_mean(d_loss_real) + tf.reduce_mean(d_loss_fake)
@@ -546,7 +548,8 @@ for epoch in range(start_epoch,EPOCHS+1):
             
             #g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
             #g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
-            g_loss = tf.losses.hinge_loss(labels=real_y, logits=tf.nn.softmax(gen_out))        
+            g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out)        
+            g_loss *= g_loss # square hinge
             g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, gen_out))
             
             #x_gen_input = gen_input_batch(real_y) # same classes, different noise
