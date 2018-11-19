@@ -39,12 +39,17 @@ FLAGS = tf.app.flags.FLAGS
 # Basic model parameters.
 tf.app.flags.DEFINE_integer('batch_size', 20,
                             """Number of images to process in a batch.""")
-tf.app.flags.DEFINE_string('data_dir', 'data',
-                           """Path to the BBBC006 data directory.""")
+tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
+                           """Path to the data directory.""")
 tf.app.flags.DEFINE_boolean('use_fp16', False,
-                            """Train the model using fp16.""")
+                            """Train the model using fp16. [XXX NOT WORKING]""")
 tf.app.flags.DEFINE_float('gpu_memory_fraction', 0.8,
                             """Fraction of GPU memory to reserve; 1.0 may crash the OS window manager.""")
+tf.app.flags.DEFINE_integer('epoch', 1,
+                            """Epoch number of last checkpoint for continuation! (e.g., number of last screenshot)""")
+
+dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
+npdtype = np.float16 if FLAGS.use_fp16 else np.float32
                             
 from tensorflow.keras.backend import set_session
 config = tf.ConfigProto()
@@ -55,12 +60,7 @@ session = tf.Session(config=config)
 set_session(session)
 
 ctx = None
-    
-if 'mxnet' == K.backend():
-    import mxnet
-    ctx = ["gpu(0)"]
-    
-    
+   
 
 #keras.backend.set_floatx('float16')
     
@@ -68,7 +68,7 @@ EPOCHS = 5000
 
 #METRICS=[keras.metrics.categorical_accuracy]
 
-INIT=tf.orthogonal_initializer()
+INIT=tf.orthogonal_initializer(dtype = dtype)
 
 GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
@@ -76,21 +76,21 @@ DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
 
 load_disc=None
 load_gen=None
-start_epoch=1
+start_epoch=FLAGS.epoch
 
 tags = ["A", "B", "C", "D"]
 
-for i in range(len(sys.argv)):
-    if sys.argv[i] == '-epoch':
-        start_epoch = int(sys.argv[i+1]) # for convenience when resuming
-        tag = tags[ start_epoch % len(tags) ]
-        load_disc = DISCRIM_WEIGHTS.format(tag)
-        load_gen = GEN_WEIGHTS.format(tag)
-        start_epoch += 1
-    if sys.argv[i] == '-d':
-        load_disc = sys.argv[i+1]
-    if sys.argv[i] == '-g':
-        load_gen = sys.argv[i+1]
+if start_epoch > 1:
+    tag = tags[ start_epoch % len(tags) ]
+    load_disc = DISCRIM_WEIGHTS.format(tag)
+    load_gen = GEN_WEIGHTS.format(tag)
+    start_epoch += 1
+
+#for i in range(len(sys.argv)):
+#    if sys.argv[i] == '-d':
+#        load_disc = sys.argv[i+1]
+#    if sys.argv[i] == '-g':
+#        load_gen = sys.argv[i+1]
 
 
 ###
@@ -112,10 +112,11 @@ train_datagen = ImageDataGenerator(
         fill_mode='nearest',
         cval=255,
         horizontal_flip=False,
-        data_format='channels_first')
+        data_format='channels_first',
+        dtype=dtype)
 
 train_generator = train_datagen.flow_from_directory(
-        './dir_per_class',
+        FLAGS.data_dir,
         target_size=(64, 64),
         batch_size=batch_size,
         class_mode='sparse',
@@ -179,7 +180,7 @@ def Discriminator():
     
     inp = Input((3,64,64))    
     
-    d = GaussianNoise(0.4)(inp)
+    #d = GaussianNoise(0.4)(inp)
     
     d = inp
     
@@ -207,7 +208,7 @@ def Discriminator():
     d = Dense(512, kernel_initializer=INIT)(d)
     d = PReLU()(d)
     d = BatchNormalization()(d)
-    d = Dropout(dense_dropout)(d)
+    #d = Dropout(dense_dropout)(d)
     
     #d = Dense(512, kernel_initializer=INIT)(d)
     #d = Dropout(dense_dropout)(d)
@@ -241,6 +242,16 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
     D1 = tf.nn.sigmoid(D1_logits)
     D2 = tf.nn.sigmoid(D2_logits)
 
+    # convnert real real to max probability of any real sample
+    D1 = D1[:,:-1]
+    D1 = tf.convert_to_tensor([(max(x),) for x in D1], dtype=dtype)
+    
+    # convert fake prediction 1 - probability of fakeness
+    #D2 = 1 - D2[:,-1:]
+    # or not? it doesn't work and I don't get why yet
+    
+    #print("D1 = {}, D2 = {}".format(D1, D2))
+    
     if tape:
         # eager version
         with tape.stop_recording():
@@ -255,7 +266,9 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
     grad_D1_logits_norm = tf.norm(tf.reshape(grad_D1_logits, [batch_size,-1]), axis=1, keep_dims=True)
     grad_D2_logits_norm = tf.norm(tf.reshape(grad_D2_logits, [batch_size,-1]), axis=1, keep_dims=True)
 
-    print("{} vs {}".format(grad_D1_logits_norm.shape, D1.shape))
+    #grad_D1_logits_norm = tf.tile(grad_D1_logits_norm, (1, num_classes))
+    #grad_D2_logits_norm = tf.tile(grad_D2_logits_norm, (1, num_classes))
+    #print("{} vs {}".format(grad_D1_logits_norm.shape, D1.shape))
     #set keep_dims=True/False such that grad_D_logits_norm.shape == D.shape
     assert grad_D1_logits_norm.shape == D1.shape
     assert grad_D2_logits_norm.shape == D2.shape
@@ -265,6 +278,8 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
     disc_regularizer = tf.reduce_mean(reg_D1 + reg_D2)
     return disc_regularizer
 
+#Discriminator_Regularizer = tf.contrib.eager.defun(Discriminator_Regularizer) # fails!
+    
 ###
 ### G E N E R A T O R
 ###
@@ -272,15 +287,15 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
 def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=True):
     conv = gtensor
     if upsample: 
-        conv = UpSampling2D()(conv)
+        conv = UpSampling2D(dtype=dtype)(conv)
     
     if deconvolve:
-        conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT)(conv)
+        conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, dtype=dtype)(conv)
         conv = PReLU()(conv)     
         conv = BatchNormalization()(conv)    
         
     #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
-    conv = Conv2D(depth, 3, padding='same', kernel_initializer=INIT)(conv)
+    conv = Conv2D(depth, 3, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
     conv = PReLU()(conv)  
     conv = BatchNormalization()(conv)        
 
@@ -293,12 +308,12 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=True)
 NOISE = 50
     
 def Generator():
-    input = Input((NOISE+num_classes,))
+    input = Input((NOISE+num_classes,), dtype=dtype)
     #g = Dense(512, kernel_initializer=INIT)(input)    
     #g = PReLU()(g)
     #g = BatchNormalization()(g)
 
-    g = Dense(4*4*512, kernel_initializer=INIT)(input)
+    g = Dense(4*4*512, kernel_initializer=INIT, dtype=dtype)(input)
     g = PReLU()(g)
     g = BatchNormalization()(g)
     
@@ -362,9 +377,9 @@ def gen_input_rand(clipping=1.0):
 # optionally receives one-hot class array from training loop
 def gen_input_batch(classes=None, clipping=1.0):
     if type(classes) != type(None):
-        return np.array([gen_input(cls, clipping) for cls in classes], dtype=np.float32)
+        return np.array([gen_input(cls, clipping) for cls in classes], dtype=npdtype)
     print("!!! Generating random batch in gen_input_batch()!")
-    return np.array([gen_input_rand(clipping) for x in range(batch_size)], dtype=np.float32)
+    return np.array([gen_input_rand(clipping) for x in range(batch_size)], dtype=npdtype)
 
 def img_float_to_uint8(img, do_reshape=True):
     out = img
@@ -373,7 +388,7 @@ def img_float_to_uint8(img, do_reshape=True):
     return out
     
 def img_uint8_to_float(img):
-    img = np.float32(img)
+    img = dtype(img)
     img *= 1./255
     return img
 
@@ -484,35 +499,40 @@ for epoch in range(start_epoch,EPOCHS+1):
         x = tf.convert_to_tensor(x)
         if len(y) != train_generator.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
-        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=np.float32)
-        all_fake_y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=np.float32)
+        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype)
+        all_fake_y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=npdtype)
         
         #set_lr(discrim, disc_real_lr)
         
         with tf.GradientTape(persistent=True) as tape:
-            #tape.watch(x)
+            tape.watch(x)
             x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
             gen_x = gen(x_gen_input, training=True)
 
             real_out = discrim(x, training=True)
-            d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
+            #d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
+            d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
             gen_out = discrim(gen_x, training=True)
             y = all_fake_y
-            d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
-            
-            d_loss = d_loss_real + d_loss_fake
+            #d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
+            d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
+            d_loss = tf.reduce_mean(d_loss_real + d_loss_fake)
             #d_loss *= 0.5
             
             # call regularizer from https://github.com/rothk/Stabilizing_GANs
-            #disc_reg = Discriminator_Regularizer(real_out, x, gen_out, gen_x, tape)
-            #d_loss += (gamma/2.0)*disc_reg
+            disc_reg = Discriminator_Regularizer(real_out, x, gen_out, gen_x, tape)
+            disc_reg = (gamma/2.0)*disc_reg
+            d_loss += disc_reg
             
-            g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
+            #g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
+            g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
             
             x_gen_input = gen_input_batch(real_y) # same classes, different noise
             gen_x = gen(x_gen_input, training=True)
             gen_out = discrim(gen_x, training=True)
-            g_loss += tf.losses.softmax_cross_entropy(real_y, gen_out)
+            #g_loss += tf.losses.softmax_cross_entropy(real_y, gen_out)
+            g_loss += tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
+            g_loss = tf.reduce_mean(g_loss)
             #g_loss *= 0.5
 
             
@@ -523,9 +543,9 @@ for epoch in range(start_epoch,EPOCHS+1):
 
         apply_gradients(gradients_of_generator, gen, gradients_of_discriminator, discrim)
 
-        print("REAL: {}".format((d_loss_real)))
-        print("FAKE: {}".format((d_loss_fake)))
-        print("REGULARIZED d_loss: {}".format((d_loss)))
+        print("REAL: {}".format(tf.reduce_mean(d_loss_real)))
+        print("FAKE: {}".format(tf.reduce_mean(d_loss_fake)))
+        print("final d_loss: {}, regularizer delta: {}".format((d_loss), disc_reg))
         print("G_LOSS: {}".format((g_loss)))
 
         end = timer()
