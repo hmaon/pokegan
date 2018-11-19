@@ -248,6 +248,7 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
     
     # convert fake prediction 1 - probability of fakeness
     #D2 = 1 - D2[:,-1:]
+    D2 = D2[:,-1:]
     # or not? it doesn't work and I don't get why yet
     
     #print("D1 = {}, D2 = {}".format(D1, D2))
