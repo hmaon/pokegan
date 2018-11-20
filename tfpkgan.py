@@ -238,7 +238,7 @@ else:
 #discrim.compile(optimizer=RMSPropOptimizer(learning_rate=0.001), loss='kullback_leibler_divergence', metrics=METRICS)
 discrim.call = tf.contrib.eager.defun(discrim.call)
 #discrim_optimizer = RMSPropOptimizer(learning_rate=0.01)    
-discrim_optimizer = AdamOptimizer(learning_rate=0.0002)
+discrim_optimizer = AdamOptimizer(learning_rate=0.0001)
 
 # from https://github.com/rothk/Stabilizing_GANs
 # D1 = disc_real, D2 = disc_fake
@@ -367,22 +367,22 @@ else:
 #gen.compile(optimizer=RMSPropOptimizer(learning_rate=0.002), loss='kullback_leibler_divergence', metrics=METRICS)
 gen.call = tf.contrib.eager.defun(gen.call)
 #gen_optimizer = RMSPropOptimizer(learning_rate=0.005)
-gen_optimizer = AdamOptimizer(learning_rate=0.0005)
+gen_optimizer = AdamOptimizer(learning_rate=0.00025)
     
 
 # _class is one-hot category array
 # randomized if None
-def gen_input(_class=None, clipping=1.0):
-    noise = np.random.uniform(0.0, clipping, NOISE)
+def gen_input(_class=None, clipping=0.95):
+    noise = np.random.uniform(0.0, 1.0, NOISE)
     if type(_class) == type(None):
-        _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes) * 0.95
-    return np.concatenate((_class, noise))
+        _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes)
+    return np.concatenate((_class, noise)) * clipping
 
 def gen_input_rand(clipping=1.0):
     return gen_input(clipping)
 
 # optionally receives one-hot class array from training loop
-def gen_input_batch(classes=None, clipping=1.0):
+def gen_input_batch(classes=None, clipping=.95):
     if type(classes) != type(None):
         return np.array([gen_input(cls, clipping) for cls in classes], dtype=npdtype)
     print("!!! Generating random batch in gen_input_batch()!")
@@ -526,7 +526,7 @@ for epoch in range(start_epoch,EPOCHS+1):
             #d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
             #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
             d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out)
-            d_loss_real *= d_loss_real # square hinge
+            #d_loss_real *= d_loss_real # square hinge
             d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(y, real_out))
             
             gen_out = discrim(gen_x, training=True)
@@ -534,7 +534,7 @@ for epoch in range(start_epoch,EPOCHS+1):
             #d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
             #d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
             d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out)
-            d_loss_fake *= d_loss_fake # square hinge
+            #d_loss_fake *= d_loss_fake # square hinge
             d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, gen_out))
             
             d_loss = tf.reduce_mean(d_loss_real) + tf.reduce_mean(d_loss_fake)
@@ -549,7 +549,7 @@ for epoch in range(start_epoch,EPOCHS+1):
             #g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
             #g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
             g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out)        
-            g_loss *= g_loss # square hinge
+            #g_loss *= g_loss # square hinge
             g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, gen_out))
             
             #x_gen_input = gen_input_batch(real_y) # same classes, different noise
