@@ -26,6 +26,8 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 from tensorflow import keras
 
+import tensorflow.contrib.eager as tfe
+
 import random,math
 import sys,os
 from timeit import default_timer as timer
@@ -209,10 +211,10 @@ def Discriminator():
     d = BatchNormalization()(d)
     
     # classify ??
-    d = Dense(512, kernel_initializer=INIT)(d)
+    d = Dense(768, kernel_initializer=INIT)(d)
     d = PReLU()(d)
     d = BatchNormalization()(d)
-    #d = Dropout(dense_dropout)(d)
+    d = Dropout(dense_dropout)(d)
     
     #d = Dense(512, kernel_initializer=INIT)(d)
     #d = Dropout(dense_dropout)(d)
@@ -235,10 +237,12 @@ if load_disc and os.path.isfile(load_disc):
 else:
     print("not loading weights for discriminator")
 
-#discrim.compile(optimizer=RMSPropOptimizer(learning_rate=0.001), loss='kullback_leibler_divergence', metrics=METRICS)
+
 discrim.call = tf.contrib.eager.defun(discrim.call)
+
+d_learning_rate = tfe.Variable(0.0002)
 #discrim_optimizer = RMSPropOptimizer(learning_rate=0.01)    
-discrim_optimizer = AdamOptimizer(learning_rate=0.0001)
+discrim_optimizer = NadamOptimizer(learning_rate=d_learning_rate)
 
 # from https://github.com/rothk/Stabilizing_GANs
 # D1 = disc_real, D2 = disc_fake
@@ -326,17 +330,17 @@ def Generator():
     
     g = Reshape(target_shape=(512,4,4))(g)
 
-    g = g_block(g, 1024, 2, upsample=False) # 8x8
+    g = g_block(g, 1024, 2, size=2, upsample=False) # 8x8
     
-    g = g_block(g, 512, 2, upsample=False) # 16x16
+    g = g_block(g, 512, 2, size=2, upsample=False) # 16x16
     
-    g = g_block(g, 256, 2, upsample=False)  # 32x32
+    g = g_block(g, 256, 2, size=2, upsample=False)  # 32x32
     
-    g = g_block(g, 128, 2, upsample=False) # 64x64
+    g = g_block(g, 256, 2, size=2, upsample=False) # 64x64
 
     # I don't know what these are supposed to do but whatever:
     
-    g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
+    g = g_block(g, 128, 1, size=2, upsample=False, deconvolve=False) # 64x64
     
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
     #g = PReLU()(g)
@@ -364,10 +368,11 @@ if load_gen and os.path.isfile(load_gen):
 else:
     print("not loading weights for generator")
 
-#gen.compile(optimizer=RMSPropOptimizer(learning_rate=0.002), loss='kullback_leibler_divergence', metrics=METRICS)
 gen.call = tf.contrib.eager.defun(gen.call)
+
+g_learning_rate = tfe.Variable(0.0005)
 #gen_optimizer = RMSPropOptimizer(learning_rate=0.005)
-gen_optimizer = AdamOptimizer(learning_rate=0.00025)
+gen_optimizer = NadamOptimizer(learning_rate=g_learning_rate)
     
 
 # _class is one-hot category array
@@ -512,8 +517,10 @@ for epoch in range(start_epoch,EPOCHS+1):
         x = tf.convert_to_tensor(x)
         if len(y) != train_generator.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
-        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype)
-        all_fake_y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=npdtype)
+        y = real_y = tf.convert_to_tensor(np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype))
+        all_fake_y = tf.convert_to_tensor(np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=npdtype))
+        
+        weights = tf.ones_like(y) * 0.5 + real_y * 0.5 + all_fake_y * 0.5
         
         #set_lr(discrim, disc_real_lr)
         
@@ -525,7 +532,7 @@ for epoch in range(start_epoch,EPOCHS+1):
             real_out = discrim(x, training=True)
             #d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
             #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
-            d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out)
+            d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out, weights=weights)
             #d_loss_real *= d_loss_real # square hinge
             d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(y, real_out))
             
@@ -533,7 +540,7 @@ for epoch in range(start_epoch,EPOCHS+1):
             y = all_fake_y
             #d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
             #d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
-            d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out)
+            d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out, weights=weights)
             #d_loss_fake *= d_loss_fake # square hinge
             d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, gen_out))
             
@@ -548,7 +555,7 @@ for epoch in range(start_epoch,EPOCHS+1):
             
             #g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
             #g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
-            g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out)        
+            g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out, weights=weights)
             #g_loss *= g_loss # square hinge
             g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, gen_out))
             
@@ -594,7 +601,11 @@ for epoch in range(start_epoch,EPOCHS+1):
         #print("mean d grads: {:.8f}, mean g grads: {:.8f}".format(tf.reduce_mean(gradients_of_generator), tf.reduce_mean(gradients_of_discriminator)))
         print("batch time: {:.3f}, total_time: {:.3f}, mean time: {:.3f}\n".format(end-start, total_time, total_time / batches_timed))
         
-    #train_generator.reset()
+    if epoch > 100:
+        d_learning_rate.assign(d_learning_rate * 0.997)
+        g_learning_rate.assign(g_learning_rate * 0.997)
+        print("d_learning_rate = {}, g_learning_rate = {}".format(d_learning_rate.numpy, g_learning_rate.numpy))
+        
     sample(epoch)
     if epoch % 5 == 0:
         tag = tags[epoch % len(tags)]
