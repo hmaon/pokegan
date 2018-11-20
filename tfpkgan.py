@@ -186,10 +186,10 @@ def Discriminator():
     
     inp = Input((3,64,64))    
     
-    d = GaussianNoise(0.1)(inp)
+    d = LeakyReLU(alpha=0.1)(inp) # clip negative input values from generator, as they're also clipped in image sampling but should not be
     
-    d = inp
-    
+    d = GaussianNoise(0.1)(d)
+        
     d = Conv2D(32, 3, padding='valid', input_shape=(3,64,64), kernel_initializer=INIT)(d) # 62x62
     BatchNormalization()(d)
     PReLU()(d)
@@ -242,7 +242,7 @@ discrim.call = tf.contrib.eager.defun(discrim.call)
 
 d_learning_rate = tfe.Variable(0.0002)
 #discrim_optimizer = RMSPropOptimizer(learning_rate=0.01)    
-discrim_optimizer = NadamOptimizer(learning_rate=d_learning_rate)
+discrim_optimizer = AdamOptimizer(learning_rate=d_learning_rate)
 
 # from https://github.com/rothk/Stabilizing_GANs
 # D1 = disc_real, D2 = disc_fake
@@ -302,12 +302,12 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=True)
     
     if deconvolve:
         conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, dtype=dtype)(conv)
-        conv = PReLU()(conv)     
+        conv = LeakyReLU(0.1)(conv)     
         conv = BatchNormalization()(conv)    
         
     #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
-    conv = Conv2D(depth, 3, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
-    conv = PReLU()(conv)  
+    conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
+    conv = LeakyReLU(0.1)(conv)  
     conv = BatchNormalization()(conv)        
 
     #conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
@@ -324,23 +324,24 @@ def Generator():
     #g = PReLU()(g)
     #g = BatchNormalization()(g)
 
-    g = Dense(4*4*512, kernel_initializer=INIT, dtype=dtype)(input)
+    g = Dense(2*2*1024, kernel_initializer=INIT, dtype=dtype)(input)
     g = PReLU()(g)
     g = BatchNormalization()(g)
     
-    g = Reshape(target_shape=(512,4,4))(g)
+    g = Reshape(target_shape=(1024,2,2))(g)
 
-    g = g_block(g, 1024, 2, size=2, upsample=False) # 8x8
+    g = g_block(g, 1024, 2, size=3, upsample=True, deconvolve=False) # 4x4
     
-    g = g_block(g, 512, 2, size=2, upsample=False) # 16x16
+    g = g_block(g, 512, 2, size=3, upsample=False) # 8x8
     
-    g = g_block(g, 256, 2, size=2, upsample=False)  # 32x32
+    g = g_block(g, 512, 2, size=3, upsample=False) # 16x16
     
-    g = g_block(g, 256, 2, size=2, upsample=False) # 64x64
+    g = g_block(g, 256, 2, size=3, upsample=False)  # 32x32
+    
+    g = g_block(g, 256, 2, size=3, upsample=False) # 64x64
 
     # I don't know what these are supposed to do but whatever:
-    
-    g = g_block(g, 128, 1, size=2, upsample=False, deconvolve=False) # 64x64
+    g = g_block(g, 128, 1, size=3, upsample=False, deconvolve=False) # 64x64
     
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
     #g = PReLU()(g)
@@ -354,7 +355,7 @@ def Generator():
     #g = PReLU()(g)
     #g = BatchNormalization()(g)
     
-    g = Conv2D(3, 1, activation='sigmoid')(g)
+    g = Conv2D(3, 1, activation='tanh', padding='same')(g)
     g = Reshape((3, 64, 64))(g) # not sure if needed but we're doing channels_first; it helps as a sanity check when coding, at least!
     
     gen = Model(inputs=input, outputs=g)
@@ -372,7 +373,7 @@ gen.call = tf.contrib.eager.defun(gen.call)
 
 g_learning_rate = tfe.Variable(0.0005)
 #gen_optimizer = RMSPropOptimizer(learning_rate=0.005)
-gen_optimizer = NadamOptimizer(learning_rate=g_learning_rate)
+gen_optimizer = AdamOptimizer(learning_rate=g_learning_rate)
     
 
 # _class is one-hot category array
@@ -447,7 +448,7 @@ def sample(filenum=0):
         inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+5)], clipping=0.5)
         _classidx+=5
         print(inp.shape)
-        batch_out = gen.predict(inp)
+        batch_out = tf.nn.relu(gen.predict(inp)).numpy()
         print(batch_out.shape)
         for out in batch_out:
             all_out.append(out)
@@ -520,7 +521,8 @@ for epoch in range(start_epoch,EPOCHS+1):
         y = real_y = tf.convert_to_tensor(np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype))
         all_fake_y = tf.convert_to_tensor(np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=npdtype))
         
-        weights = tf.ones_like(y) * 0.5 + real_y * 0.5 + all_fake_y * 0.5
+        weights = tf.ones_like(y) * 0.5 + real_y * (.5/.9) + all_fake_y * (.5/.9)
+        #print(weights.numpy())
         
         #set_lr(discrim, disc_real_lr)
         
@@ -604,7 +606,7 @@ for epoch in range(start_epoch,EPOCHS+1):
     if epoch > 100:
         d_learning_rate.assign(d_learning_rate * 0.997)
         g_learning_rate.assign(g_learning_rate * 0.997)
-        print("d_learning_rate = {}, g_learning_rate = {}".format(d_learning_rate.numpy, g_learning_rate.numpy))
+        print("d_learning_rate = {}, g_learning_rate = {}".format(d_learning_rate.numpy(), g_learning_rate.numpy()))
         
     sample(epoch)
     if epoch % 5 == 0:
