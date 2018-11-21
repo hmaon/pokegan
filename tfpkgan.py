@@ -1,4 +1,6 @@
 import numpy as np
+import queue
+import threading
 import time
 
 
@@ -39,13 +41,13 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 19,
+tf.app.flags.DEFINE_integer('batch_size', 10,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
 tf.app.flags.DEFINE_boolean('use_fp16', False,
                             """Train the model using fp16. [XXX NOT WORKING]""")
-tf.app.flags.DEFINE_float('gpu_memory_fraction', 0.85,
+tf.app.flags.DEFINE_float('gpu_memory_fraction', 0.8,
                             """Fraction of GPU memory to reserve; 1.0 may crash the OS window manager.""")
 tf.app.flags.DEFINE_integer('epoch', 1,
                             """Epoch number of last checkpoint for continuation! (e.g., number of last screenshot)""")
@@ -54,7 +56,7 @@ dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
 npdtype = np.float16 if FLAGS.use_fp16 else np.float32
                             
 from tensorflow.keras.backend import set_session
-config = tf.ConfigProto()
+config = tf.ConfigProto(intra_op_parallelism_threads=0, inter_op_parallelism_threads=0)
 config.gpu_options.per_process_gpu_memory_fraction = FLAGS.gpu_memory_fraction
 config.gpu_options.allow_growth = True
 config.gpu_options.visible_device_list = "0"
@@ -74,7 +76,7 @@ EPOCHS = 5000
 
 #METRICS=[keras.metrics.categorical_accuracy]
 
-INIT=tf.orthogonal_initializer(dtype = dtype)
+INIT=tf.initializers.glorot_normal(dtype = dtype)
 
 GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
@@ -108,53 +110,78 @@ def rangeshift(inp):
     #print(inp)
     return inp
 
-batch_size = 23    
+batch_size = FLAGS.batch_size
     
-train_datagen = ImageDataGenerator(
+ImageDatagen = ImageDataGenerator(
         rescale=1./255,
-        width_shift_range=3,
-        height_shift_range=3,
-        shear_range=5,
-        fill_mode='nearest',
+        width_shift_range=10,
+        height_shift_range=10,
+        zoom_range=0.1,
+        fill_mode='wrap',
         cval=255,
-        horizontal_flip=False,
-        data_format='channels_first',
+        horizontal_flip=True,
+        data_format='channels_last',
         dtype=dtype)
 
-train_generator = train_datagen.flow_from_directory(
+train_gen = ImageDatagen.flow_from_directory(
         FLAGS.data_dir,
         target_size=(64, 64),
         batch_size=batch_size,
         class_mode='sparse',
         interpolation='lanczos')
 
-num_classes = train_generator.num_classes + 1 # pokemon + fake
+num_classes = train_gen.num_classes + 1 # pokemon + fake
 
+flowQueue = queue.Queue(5)
+
+class LoadThread(threading.Thread):
+    def __init__(self, q, datagen):
+        threading.Thread.__init__(self)
+        self.q = q
+        self.datagen = datagen
+
+    def run(self):
+        print ("Starting image data loader thread")
+        while True:
+            while self.q.full():
+                time.sleep(.05)
+            self.q.put(self.datagen.next())
+
+def next_batch():
+    while flowQueue.empty():
+        time.sleep(.05)
+    ret = flowQueue.get()
+    return ret
+
+loadThread = LoadThread(flowQueue, train_gen)
+loadThread.daemon = True
+loadThread.start()
+    
 ###
 ### D I S C R I M I N A T O R
 ###
 
-def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='valid'):
+def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same'):
 
     # feature detection
     dtensor = Conv2D(depth, 3, strides=1,\
                               padding='same',\
                               kernel_initializer=INIT)(dtensor)
-    dtensor = PReLU()(dtensor)
+    dtensor = LeakyReLU()(dtensor)
     dtensor = BatchNormalization()(dtensor)
     
     # strided higher level feature detection
     dtensor = Conv2D(depth, 3, strides=stride,\
                               padding=stridedPadding,\
                               kernel_initializer=INIT)(dtensor)
-    dtensor = PReLU()(dtensor)
+    dtensor = LeakyReLU()(dtensor)
     dtensor = BatchNormalization()(dtensor)
     if maxpool:
         dtensor = MaxPool2D(padding='same')(dtensor)
         
     # nonsense?
     dtensor = Conv2D(depth, 1, kernel_initializer=INIT)(dtensor)
-    dtensor = PReLU()(dtensor)
+    dtensor = LeakyReLU()(dtensor)
     dtensor = BatchNormalization()(dtensor)    
     return dtensor
 
@@ -168,61 +195,60 @@ def res_d_block(dtensor, depth, stride = 1):
     # diagram at https://towardsdatascience.com/an-overview-of-resnet-and-its-variants-5281e2f56035 ... seems weird but who am I to argue
     if stride == 2:
         short = AveragePooling2D()(short)
-    short = PReLU()(short)  
+    short = LeakyReLU()(short)  
     short = BatchNormalization()(short)    
     short = SeparableConv2D(depth, 1)(short) 
 
-    short = PReLU()(short)
-    short = BatchNormalization()(short)    
-    short = SeparableConv2D(depth, 1)(short)
-    short = PReLU()(short)
-    short = BatchNormalization()(short)    
-    
+    #short = PReLU()(short)
+    #short = BatchNormalization()(short)    
+    #short = SeparableConv2D(depth, 1)(short)
+    short = LeakyReLU()(short)
+    short = BatchNormalization()(short)        
         
     return Add()([conv, short])
     
 def Discriminator():
-    dense_dropout = 0.1
+    dense_dropout = 0.05
     
-    inp = Input((3,64,64))    
+    inp = Input((64,64,3))    
     
-    d = LeakyReLU(alpha=0.1)(inp) # clip negative input values from generator, as they're also clipped in image sampling but should not be
+    d = LeakyReLU(alpha=0.1)(inp) # clip negative input values from generator, as they're also clipped in image sampling
     
-    d = GaussianNoise(0.1)(d)
+    d = GaussianNoise(0.01)(d)
         
-    d = Conv2D(32, 3, padding='valid', input_shape=(3,64,64), kernel_initializer=INIT)(d) # 62x62
+    d = Conv2D(64, 3, padding='same', kernel_initializer=INIT)(d) # 64x64
     BatchNormalization()(d)
-    PReLU()(d)
+    LeakyReLU()(d)
     
-    d = Conv2D(64, 3, padding='valid', kernel_initializer=INIT, strides=2)(d) # 30x30
+    d = Conv2D(128, 3, padding='same', kernel_initializer=INIT, strides=2)(d) # 32x32
     BatchNormalization()(d)
-    PReLU()(d)
+    LeakyReLU()(d)
        
        
-    d = d_block(d, 256, 2) # 14x14
-    d = d_block(d, 512, 2) # 6x6
-    d = d_block(d, 512, 2) # 2x2
-    #d = d_block(d, 512, 2) # 2x2
+    d = res_d_block(d, 256, 2) # 16x16
+    d = res_d_block(d, 512, 2) # 8x8
+    d = res_d_block(d, 1024, 2) # 4x4
+    d = res_d_block(d, 1024, 2) # 2x2
     
-    d = Conv2D(512, 2, kernel_initializer=INIT, strides = 2)(d) 
+    d = Conv2D(1024, 2, kernel_initializer=INIT, strides = 2)(d) 
     d = Flatten()(d)
 
-    d = PReLU()(d)
+    d = LeakyReLU()(d)
     d = BatchNormalization()(d)
     
     # classify ??
-    d = Dense(768, kernel_initializer=INIT)(d)
-    d = PReLU()(d)
+    d = Dense(1024, kernel_initializer=INIT)(d)
+    d = LeakyReLU()(d)
     d = BatchNormalization()(d)
-    d = Dropout(dense_dropout)(d)
-    
-    #d = Dense(512, kernel_initializer=INIT)(d)
     #d = Dropout(dense_dropout)(d)
-    #d = PReLU()(d)
-    #d = BatchNormalization()(d)    
+    
+    d = Dense(512, kernel_initializer=INIT)(d)
+    #d = Dropout(dense_dropout)(d)
+    d = PReLU()(d)
+    d = BatchNormalization()(d)    
     
     d = Dense(num_classes, kernel_initializer=INIT)(d)
-    #d = Softmax()(d) # calculated in softmax_cross_entropy()
+    #d = Softmax()(d) # calculated in softmax_cross_entropy() but not in hinge_loss()?
         
     discrim = Model(inputs=inp, outputs=d)    
 
@@ -240,7 +266,7 @@ else:
 
 discrim.call = tf.contrib.eager.defun(discrim.call)
 
-d_learning_rate = tfe.Variable(0.0002)
+d_learning_rate = tfe.Variable(0.0004)
 #discrim_optimizer = RMSPropOptimizer(learning_rate=0.01)    
 discrim_optimizer = AdamOptimizer(learning_rate=d_learning_rate)
 
@@ -316,7 +342,7 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=True)
     
     return conv
     
-NOISE = 50
+NOISE = 100
     
 def Generator():
     input = Input((NOISE+num_classes,), dtype=dtype)
@@ -324,24 +350,26 @@ def Generator():
     #g = PReLU()(g)
     #g = BatchNormalization()(g)
 
-    g = Dense(2*2*1024, kernel_initializer=INIT, dtype=dtype)(input)
+    g = Dense(2*2*512, kernel_initializer=INIT, dtype=dtype)(input)
     g = PReLU()(g)
     g = BatchNormalization()(g)
     
-    g = Reshape(target_shape=(1024,2,2))(g)
+    g = Reshape(target_shape=(2,2,512))(g)
 
-    g = g_block(g, 1024, 2, size=3, upsample=True, deconvolve=False) # 4x4
+    g = g_block(g, 512, 2, size=3, upsample=False) # 4x4
     
     g = g_block(g, 512, 2, size=3, upsample=False) # 8x8
     
-    g = g_block(g, 512, 2, size=3, upsample=False) # 16x16
+    g = g_block(g, 256, 2, size=3, upsample=False) # 16x16
     
-    g = g_block(g, 256, 2, size=3, upsample=False)  # 32x32
+    g = g_block(g, 128, 2, size=3, upsample=False)  # 32x32
     
-    g = g_block(g, 256, 2, size=3, upsample=False) # 64x64
+    g = g_block(g, 64, 2, size=3, upsample=False) # 64x64
 
     # I don't know what these are supposed to do but whatever:
-    g = g_block(g, 128, 1, size=3, upsample=False, deconvolve=False) # 64x64
+    g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
+
+    g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
     
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
     #g = PReLU()(g)
@@ -355,8 +383,9 @@ def Generator():
     #g = PReLU()(g)
     #g = BatchNormalization()(g)
     
+    print(g.shape)
     g = Conv2D(3, 1, activation='tanh', padding='same')(g)
-    g = Reshape((3, 64, 64))(g) # not sure if needed but we're doing channels_first; it helps as a sanity check when coding, at least!
+    g = Reshape((64, 64, 3))(g) 
     
     gen = Model(inputs=input, outputs=g)
     gen.summary()
@@ -379,10 +408,10 @@ gen_optimizer = AdamOptimizer(learning_rate=g_learning_rate)
 # _class is one-hot category array
 # randomized if None
 def gen_input(_class=None, clipping=0.95):
-    noise = np.random.uniform(0.0, 1.0, NOISE)
+    noise = np.random.uniform(-clipping, clipping, NOISE)
     if type(_class) == type(None):
         _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes)
-    return np.concatenate((_class, noise)) * clipping
+    return np.concatenate((_class, noise))
 
 def gen_input_rand(clipping=1.0):
     return gen_input(clipping)
@@ -396,7 +425,7 @@ def gen_input_batch(classes=None, clipping=.95):
 
 def img_float_to_uint8(img, do_reshape=True):
     out = img
-    if do_reshape: out = out.reshape(3, 64, 64)
+    if do_reshape: out = out.reshape(64, 64, 3)
     out = np.uint8(out * 255)
     return out
     
@@ -415,14 +444,14 @@ def img_quantize(img): # img is a Tensor
 def render(all_out, filenum=0):            
     pad = 3
     swatchdim = 64 # 64x64 is the output of the generator
-    swatches = 5 # per side
+    swatches = 6 # per side
     dim = (pad+swatchdim) * swatches
     img = PIL.Image.new("RGB", (dim, dim), "white")
 
     for i in range(min(swatches * swatches, len(all_out))):
         out = all_out[i]
         out = img_float_to_uint8(out)
-        out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
+        #out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
         #print("check this: ")
         #print(out.shape)
         swatch = PIL.Image.fromarray(out)
@@ -444,9 +473,9 @@ def sample(filenum=0):
     classes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
     print(len(classes))
     _classidx=0
-    for i in range(5):
-        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+5)], clipping=0.5)
-        _classidx+=5
+    for i in range(3):
+        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+12)], clipping=0.5)
+        _classidx += 12
         print(inp.shape)
         batch_out = tf.nn.relu(gen.predict(inp)).numpy()
         print(batch_out.shape)
@@ -472,9 +501,9 @@ def sample(filenum=0):
 #adver.compile(optimizer=RMSPropOptimizer(learning_rate=0.002), loss='kullback_leibler_divergence', metrics=METRICS) 
 
 ### some instrumentation
-#render(train_generator.next()[0], -99)
+render(next_batch()[0], -99)
 sample(0)
-train_generator.reset()
+#train_generator.reset()
 #exit()
 
 ###
@@ -493,7 +522,7 @@ def set_lr(model, newlr):
 ### T R A I N
 ###
 
-batches = math.floor(train_generator.n / train_generator.batch_size)
+batches = math.floor(train_gen.n / train_gen.batch_size)
 
 batches_timed = 0
 total_time = 0
@@ -514,14 +543,16 @@ for epoch in range(start_epoch,EPOCHS+1):
         start = timer()
         
         # get real data
-        x,y = train_generator.next()
-        x = tf.convert_to_tensor(x)
-        if len(y) != train_generator.batch_size:
+        x,y = next_batch()
+        #x = tf.convert_to_tensor(x) # this sucks actually
+        if len(y) != train_gen.batch_size:
             continue # avoid re-analysis of ops due to changing batch sizes
-        y = real_y = tf.convert_to_tensor(np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype))
-        all_fake_y = tf.convert_to_tensor(np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=npdtype))
         
-        weights = tf.ones_like(y) * 0.5 + real_y * (.5/.9) + all_fake_y * (.5/.9)
+        y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype)
+        all_fake_y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=npdtype)
+        #print(all_fake_y)
+        
+        weights = tf.ones_like(y) * 0.75 + real_y * (.25/.9) + all_fake_y * (.25/.9)
         #print(weights.numpy())
         
         #set_lr(discrim, disc_real_lr)
@@ -532,22 +563,22 @@ for epoch in range(start_epoch,EPOCHS+1):
             gen_x = gen(x_gen_input, training=True)
 
             real_out = discrim(x, training=True)
-            #d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
+            d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
             #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
-            d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out, weights=weights)
+            #d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out, weights=weights)
             #d_loss_real *= d_loss_real # square hinge
             d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(y, real_out))
             
             gen_out = discrim(gen_x, training=True)
             y = all_fake_y
-            #d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
+            d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
             #d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
-            d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out, weights=weights)
+            #d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out, weights=weights)
             #d_loss_fake *= d_loss_fake # square hinge
             d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, gen_out))
             
-            d_loss = tf.reduce_mean(d_loss_real) + tf.reduce_mean(d_loss_fake)
             #d_loss = tf.reduce_mean(d_loss_real + d_loss_fake)
+            d_loss = d_loss_real + d_loss_fake
             #d_loss *= 0.5
             
             # call regularizer from https://github.com/rothk/Stabilizing_GANs
@@ -555,9 +586,9 @@ for epoch in range(start_epoch,EPOCHS+1):
             #disc_reg = (gamma/2.0)*disc_reg
             #d_loss += disc_reg
             
-            #g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
+            g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
             #g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
-            g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out, weights=weights)
+            #g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out, weights=weights)
             #g_loss *= g_loss # square hinge
             g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, gen_out))
             
@@ -566,7 +597,7 @@ for epoch in range(start_epoch,EPOCHS+1):
             #gen_out = discrim(gen_x, training=True)
             #g_loss += tf.losses.softmax_cross_entropy(real_y, gen_out)
             #g_loss += tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
-            g_loss = tf.reduce_mean(g_loss)
+            #g_loss = tf.reduce_mean(g_loss)
             #g_loss *= 0.5
 
             
@@ -592,10 +623,11 @@ for epoch in range(start_epoch,EPOCHS+1):
                 tf.contrib.summary.scalar("d_accuracy_fake", d_acc_fake/batch_size)
                 tf.contrib.summary.scalar("g_loss", g_loss)
                 tf.contrib.summary.scalar("g_accuracy", g_acc/batch_size)
-                tf.contrib.summary.histogram("g_grads?", gradients_of_generator[0]) 
+                #tf.contrib.summary.histogram("g_grads?", gradients_of_generator[0]) 
         
         writer.flush()
         
+        print("{} / {}".format(batch_num, batches))
         print("REAL: {:.3f}, acc: {:.3f}".format(d_loss_real, d_acc_real/batch_size))
         print("FAKE: {:.3f}, acc: {:.3f}".format(d_loss_fake, d_acc_fake/batch_size))
         #print("final d_loss: {}, regularizer delta: {}".format((d_loss), disc_reg))
