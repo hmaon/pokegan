@@ -2,6 +2,7 @@ import numpy as np
 import queue
 import threading
 import time
+import math
 
 
 # TODO:
@@ -19,8 +20,9 @@ from tensorflow.keras.layers import LeakyReLU, Dropout, ReLU, PReLU
 from tensorflow.keras.layers import BatchNormalization
 from tensorflow.keras.layers import Softmax, Input, Concatenate, Add
 from tensorflow.train import AdamOptimizer, RMSPropOptimizer, ProximalAdagradOptimizer
-from tensorflow.contrib.opt import NadamOptimizer
+from tensorflow.contrib.opt import NadamOptimizer, AdamWOptimizer
 from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.constraints import MinMaxNorm
 
 from tensorflow.keras import backend as K
 
@@ -41,16 +43,21 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 10,
+tf.app.flags.DEFINE_integer('batch_size', 20,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
 tf.app.flags.DEFINE_boolean('use_fp16', False,
                             """Train the model using fp16. [XXX NOT WORKING]""")
-tf.app.flags.DEFINE_float('gpu_memory_fraction', 0.8,
+tf.app.flags.DEFINE_float('gpu_memory_fraction', 0.85,
                             """Fraction of GPU memory to reserve; 1.0 may crash the OS window manager.""")
 tf.app.flags.DEFINE_integer('epoch', 1,
                             """Epoch number of last checkpoint for continuation! (e.g., number of last screenshot)""")
+tf.app.flags.DEFINE_string('gen', None,
+                           """Generator weights to load.""")
+tf.app.flags.DEFINE_string('disc', None,
+                           """Discriminator weights to load.""")
+                           
 
 dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
 npdtype = np.float16 if FLAGS.use_fp16 else np.float32
@@ -73,10 +80,17 @@ writer = tf.contrib.summary.create_file_writer(save_path)
 #keras.backend.set_floatx('float16')
     
 EPOCHS = 5000
+d_learning_base_rate = 0.0002
+g_learning_base_rate = 0.0004
+#base_gaussian_noise = .1
 
 #METRICS=[keras.metrics.categorical_accuracy]
 
-INIT=tf.initializers.glorot_normal(dtype = dtype)
+#INIT=tf.initializers.orthogonal(dtype = dtype)
+INIT='orthogonal'
+PRELUINIT=keras.initializers.Constant(value=0.3)
+#g_batchnorm_constraint = MinMaxNorm(min_value=-1.0, max_value=1.0, rate=1.0, axis=[0])
+g_batchnorm_constraint = None
 
 GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
@@ -89,11 +103,21 @@ start_epoch=FLAGS.epoch
 tags = ["A", "B", "C", "D"]
 
 if start_epoch > 1:
-    tag = tags[ start_epoch % len(tags) ]
+    tag = tags[ math.floor(start_epoch/4) % len(tags) ]
     load_disc = DISCRIM_WEIGHTS.format(tag)
     load_gen = GEN_WEIGHTS.format(tag)
     start_epoch += 1
 
+if FLAGS.disc != None:
+    load_disc = FLAGS.disc
+elif FLAGS.disc == 'None':
+    load_disc = None
+    
+if FLAGS.gen != None:
+    load_gen = FLAGS.gen
+elif FLAGS.disc == 'None':
+    load_disc = None
+    
 #for i in range(len(sys.argv)):
 #    if sys.argv[i] == '-d':
 #        load_disc = sys.argv[i+1]
@@ -114,8 +138,8 @@ batch_size = FLAGS.batch_size
     
 ImageDatagen = ImageDataGenerator(
         rescale=1./255,
-        width_shift_range=10,
-        height_shift_range=10,
+        width_shift_range=7,
+        height_shift_range=7,
         zoom_range=0.1,
         fill_mode='wrap',
         cval=255,
@@ -130,7 +154,7 @@ train_gen = ImageDatagen.flow_from_directory(
         class_mode='sparse',
         interpolation='lanczos')
 
-num_classes = train_gen.num_classes + 1 # pokemon + fake
+num_classes = train_gen.num_classes + 1 # classes + fake
 
 flowQueue = queue.Queue(5)
 
@@ -180,73 +204,99 @@ def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same'
         dtensor = MaxPool2D(padding='same')(dtensor)
         
     # nonsense?
-    dtensor = Conv2D(depth, 1, kernel_initializer=INIT)(dtensor)
-    dtensor = LeakyReLU()(dtensor)
-    dtensor = BatchNormalization()(dtensor)    
+    #dtensor = Conv2D(depth, 1, kernel_initializer=INIT)(dtensor)
+    #dtensor = LeakyReLU()(dtensor)
+    #dtensor = BatchNormalization()(dtensor)    
     return dtensor
 
 # unused
-def res_d_block(dtensor, depth, stride = 1):
+def res_d_block(dtensor, depth, stride = 1, stridedPadding='same'):
+
+    if stride > 1:
+        dtensor = Conv2D(depth, 3, strides=stride,\
+                                  padding=stridedPadding,\
+                                  kernel_initializer=INIT)(dtensor)
+        dtensor = LeakyReLU()(dtensor)
+        dtensor = BatchNormalization()(dtensor)
+
     short = dtensor
     
-    conv = d_block(dtensor, depth, stride)
-    conv = d_block(conv, depth, 1)
+    dtensor = Conv2D(depth, 3, strides=1,\
+                              padding='same',\
+                              kernel_initializer=INIT)(dtensor)
+    dtensor = LeakyReLU()(dtensor)
+    dtensor = BatchNormalization()(dtensor)
+
+    dtensor = Conv2D(depth, 3, strides=1,\
+                              padding='same',\
+                              kernel_initializer=INIT)(dtensor)
+    dtensor = LeakyReLU()(dtensor)
+    dtensor = BatchNormalization()(dtensor)
 
     # diagram at https://towardsdatascience.com/an-overview-of-resnet-and-its-variants-5281e2f56035 ... seems weird but who am I to argue
-    if stride == 2:
-        short = AveragePooling2D()(short)
+    #if stride == 2:
+    #    short = MaxPooling2D()(short)
     short = LeakyReLU()(short)  
     short = BatchNormalization()(short)    
+    
     short = SeparableConv2D(depth, 1)(short) 
-
     #short = PReLU()(short)
-    #short = BatchNormalization()(short)    
-    #short = SeparableConv2D(depth, 1)(short)
+    short = LeakyReLU()(short)  
+    short = BatchNormalization()(short)    
+    
+    short = SeparableConv2D(depth, 1)(short)
     short = LeakyReLU()(short)
     short = BatchNormalization()(short)        
         
-    return Add()([conv, short])
-    
+    return Add()([dtensor, short])
+
+
+#gaussian_rate = tfe.Variable(d_learning_base_rate)    # can't include in Discriminator() because .save() crashes on it :( :( :( wtf :(
+
 def Discriminator():
-    dense_dropout = 0.05
+    dense_dropout = 0.1
     
     inp = Input((64,64,3))    
     
-    d = LeakyReLU(alpha=0.1)(inp) # clip negative input values from generator, as they're also clipped in image sampling
+    d = LeakyReLU(0.05)(inp) # clip negative input values from generator, as they're also clipped in image sampling
     
-    d = GaussianNoise(0.01)(d)
+    d = GaussianNoise(.15)(d)
         
-    d = Conv2D(64, 3, padding='same', kernel_initializer=INIT)(d) # 64x64
+    d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, strides=1)(d) # 64x64
     BatchNormalization()(d)
-    LeakyReLU()(d)
-    
-    d = Conv2D(128, 3, padding='same', kernel_initializer=INIT, strides=2)(d) # 32x32
-    BatchNormalization()(d)
-    LeakyReLU()(d)
-       
-       
-    d = res_d_block(d, 256, 2) # 16x16
-    d = res_d_block(d, 512, 2) # 8x8
-    d = res_d_block(d, 1024, 2) # 4x4
-    d = res_d_block(d, 1024, 2) # 2x2
-    
-    d = Conv2D(1024, 2, kernel_initializer=INIT, strides = 2)(d) 
-    d = Flatten()(d)
+    LeakyReLU()(d)          
 
-    d = LeakyReLU()(d)
-    d = BatchNormalization()(d)
+    d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, strides=2)(d) # 32x32
+    BatchNormalization()(d)
+    LeakyReLU()(d)          
     
-    # classify ??
-    d = Dense(1024, kernel_initializer=INIT)(d)
-    d = LeakyReLU()(d)
-    d = BatchNormalization()(d)
-    #d = Dropout(dense_dropout)(d)
+    d = res_d_block(d, 64, 2) # 16x16
+    d = res_d_block(d, 64, 1)     
+    d = res_d_block(d, 64, 1)     
+    d = res_d_block(d, 64, 1)     
+    
+    d = res_d_block(d, 128, 2) # 8x8
+    d = res_d_block(d, 128, 1) #     
+    d = res_d_block(d, 128, 1) #     
+    d = res_d_block(d, 128, 1) #     
+    d = res_d_block(d, 256, 2) # 4x4
+    d = res_d_block(d, 256, 1) #     
+    d = res_d_block(d, 256, 1) #     
+    d = res_d_block(d, 256, 1) #     
+    d = res_d_block(d, 256, 2) # 2x2
+    d = res_d_block(d, 256, 1) # 
+    d = res_d_block(d, 256, 1) # 
+    d = res_d_block(d, 256, 1) # 
+    
+    #d = AveragePooling2D()(d) # 1x1 mofo because that's what resnet does, I guess
+    
+    d = Flatten()(d)
     
     d = Dense(512, kernel_initializer=INIT)(d)
-    #d = Dropout(dense_dropout)(d)
-    d = PReLU()(d)
-    d = BatchNormalization()(d)    
+    d = LeakyReLU()(d)
+    d = BatchNormalization()(d)
     
+    # classify ??    
     d = Dense(num_classes, kernel_initializer=INIT)(d)
     #d = Softmax()(d) # calculated in softmax_cross_entropy() but not in hinge_loss()?
         
@@ -266,9 +316,7 @@ else:
 
 discrim.call = tf.contrib.eager.defun(discrim.call)
 
-d_learning_rate = tfe.Variable(0.0004)
-#discrim_optimizer = RMSPropOptimizer(learning_rate=0.01)    
-discrim_optimizer = AdamOptimizer(learning_rate=d_learning_rate)
+
 
 # from https://github.com/rothk/Stabilizing_GANs
 # D1 = disc_real, D2 = disc_fake
@@ -328,63 +376,89 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=True)
     
     if deconvolve:
         conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, dtype=dtype)(conv)
-        conv = LeakyReLU(0.1)(conv)     
-        conv = BatchNormalization()(conv)    
+        conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)     
+        conv = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
         
-    #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
-    conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
-    conv = LeakyReLU(0.1)(conv)  
-    conv = BatchNormalization()(conv)        
+    #conv = SeparableConv2D(depth, size, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
+    #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)  
+    #conv = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
+    
 
-    #conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
-    #conv = PReLU()(conv)  
-    #conv = BatchNormalization()(conv)    
+    #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
+    #conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
+    #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)  
+    #conv = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+
+    conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
+    conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)  
+    conv = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
     
     return conv
     
 NOISE = 100
     
 def Generator():
-    input = Input((NOISE+num_classes,), dtype=dtype)
-    #g = Dense(512, kernel_initializer=INIT)(input)    
-    #g = PReLU()(g)
-    #g = BatchNormalization()(g)
+    input = g = Input((NOISE+num_classes,), dtype=dtype)
 
-    g = Dense(2*2*512, kernel_initializer=INIT, dtype=dtype)(input)
-    g = PReLU()(g)
+    zc = Reshape(target_shape=(1, 1, NOISE+num_classes))(input)
+    zc = UpSampling2D()(zc) # 2x2
+    zc = UpSampling2D()(zc) # 4x4
+    zc = UpSampling2D()(zc) # 8x8
+
+    g = Dense(512, kernel_initializer=INIT)(g)
+    g = PReLU(alpha_initializer=PRELUINIT)(g)
     g = BatchNormalization()(g)
+
+    g = Dense(2*2*512, kernel_initializer=INIT, dtype=dtype)(g)
+    g = PReLU(alpha_initializer=PRELUINIT)(g)
+    g = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
     
     g = Reshape(target_shape=(2,2,512))(g)
 
-    g = g_block(g, 512, 2, size=3, upsample=False) # 4x4
+    g = g_block(g, 1024, 2, size=3, upsample=False) # 4x4
     
     g = g_block(g, 512, 2, size=3, upsample=False) # 8x8
+
+    g = Concatenate()([g,zc])
+
+    #zc = UpSampling2D()(zc) # 16x16
     
     g = g_block(g, 256, 2, size=3, upsample=False) # 16x16
     
-    g = g_block(g, 128, 2, size=3, upsample=False)  # 32x32
+    #zc = UpSampling2D()(zc) # 32x32
     
-    g = g_block(g, 64, 2, size=3, upsample=False) # 64x64
+    g = g_block(g, 128, 2, size=3, upsample=True, deconvolve=False)  # 32x32
+    
+    #g = Concatenate()([g,zc])
+    
+    g = g_block(g, 128, 2, size=3, upsample=True, deconvolve=False) # 64x64
 
     # I don't know what these are supposed to do but whatever:
-    g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
+    #g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
 
-    g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
-    
+    #g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
+
+    g = Conv2D(256, 3, padding='same', kernel_initializer=INIT)(g)    
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
-    #g = PReLU()(g)
-    #g = BatchNormalization()(g)
+    g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(g)
+    g = BatchNormalization()(g)
 
+    #g = Conv2D(256, 1, padding='same', kernel_initializer=INIT)(g)    
+    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)    
+    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
+    #g = LeakyReLU(0.1)(g)
+    #g = BatchNormalization()(g)    
+    
     #g = Conv2DTranspose(256, 3, padding='same', kernel_initializer=INIT)(g)
     #g = PReLU()(g)
     #g = BatchNormalization()(g)
     
-    #g = Conv2D(1024, 1, padding='same', kernel_initializer=INIT)(g)
-    #g = PReLU()(g)
+    #g = Conv2D(128, 1, padding='same', kernel_initializer=INIT)(g)
+    #g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(g)
     #g = BatchNormalization()(g)
     
-    print(g.shape)
-    g = Conv2D(3, 1, activation='tanh', padding='same')(g)
+    #print(g.shape)
+    g = Conv2D(3, 1, activation='sigmoid', padding='same')(g)
     g = Reshape((64, 64, 3))(g) 
     
     gen = Model(inputs=input, outputs=g)
@@ -395,20 +469,19 @@ gen = Generator()
 
 if load_gen and os.path.isfile(load_gen):
     gen.load_weights(load_gen)
+    print(gen.layers[1].weights)
 else:
     print("not loading weights for generator")
 
 gen.call = tf.contrib.eager.defun(gen.call)
 
-g_learning_rate = tfe.Variable(0.0005)
-#gen_optimizer = RMSPropOptimizer(learning_rate=0.005)
-gen_optimizer = AdamOptimizer(learning_rate=g_learning_rate)
-    
+
 
 # _class is one-hot category array
 # randomized if None
 def gen_input(_class=None, clipping=0.95):
-    noise = np.random.uniform(-clipping, clipping, NOISE)
+    #noise = np.random.uniform(-clipping, clipping, NOISE)
+    noise = np.random.permutation(NOISE) * (1.0 / NOISE) % clipping
     if type(_class) == type(None):
         _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes)
     return np.concatenate((_class, noise))
@@ -486,8 +559,19 @@ def sample(filenum=0):
         
 
 ###
-### adversarial model
+### optimizer config
 ###
+
+g_learning_rate = tfe.Variable(g_learning_base_rate)
+#gen_optimizer = RMSPropOptimizer(learning_rate=0.005)
+gen_optimizer = AdamOptimizer(learning_rate=g_learning_rate, beta1=0.5)
+#gen_optimizer = AdamWOptimizer(learning_rate=g_learning_rate, weight_decay=0.025)
+    
+d_learning_rate = tfe.Variable(d_learning_base_rate)
+#discrim_optimizer = RMSPropOptimizer(learning_rate=0.01)    
+discrim_optimizer = AdamOptimizer(learning_rate=d_learning_rate, beta1=0.5)
+#discrim_optimizer = AdamWOptimizer(learning_rate=d_learning_rate, weight_decay = 0.025)
+
 #for layer in discrim.layers:
 #    layer.trainable = False
 
@@ -523,6 +607,8 @@ def set_lr(model, newlr):
 ###
 
 batches = math.floor(train_gen.n / train_gen.batch_size)
+if start_epoch > 0:
+    global_step.assign(batches * start_epoch)
 
 batches_timed = 0
 total_time = 0
@@ -530,13 +616,16 @@ total_time = 0
 # for https://github.com/rothk/Stabilizing_GANs regularizer; 0.1 is a value they used without annealing in one of their examples 
 gamma = 0.1
 
-def apply_gradients(gradients_of_generator, gen, gradients_of_discriminator, discrim):
+def apply_gen_gradients(gradients_of_generator, gen):
     gen_optimizer.apply_gradients(zip(gradients_of_generator, gen.variables))
+
+apply_gen_gradients = tf.contrib.eager.defun(apply_gen_gradients)
+
+def apply_discrim_gradients(gradients_of_discriminator, discrim):
     discrim_optimizer.apply_gradients(zip(gradients_of_discriminator, discrim.variables))
 
-apply_gradients = tf.contrib.eager.defun(apply_gradients)    
-
-
+apply_discrim_gradients = tf.contrib.eager.defun(apply_discrim_gradients)
+  
 for epoch in range(start_epoch,EPOCHS+1):
     print("--- epoch %d ---" % (epoch,))
     for batch_num in range(batches):
@@ -546,7 +635,8 @@ for epoch in range(start_epoch,EPOCHS+1):
         x,y = next_batch()
         #x = tf.convert_to_tensor(x) # this sucks actually
         if len(y) != train_gen.batch_size:
-            continue # avoid re-analysis of ops due to changing batch sizes
+            render(x, -99)
+            continue # avoid re-analysis of ops due to changing batch sizes; maybe was only relevant in plaidml? not sure
         
         y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype)
         all_fake_y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=npdtype)
@@ -557,58 +647,62 @@ for epoch in range(start_epoch,EPOCHS+1):
         
         #set_lr(discrim, disc_real_lr)
         
-        with tf.GradientTape(persistent=True) as tape:
-            #tape.watch(x)
-            x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
-            gen_x = gen(x_gen_input, training=True)
+        for d_step in range(2):
+            with tf.GradientTape() as dtape, tf.GradientTape() as gtape:
+                #tape.watch(x)
+                x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
+                gen_x = gen(x_gen_input, training=True)
 
-            real_out = discrim(x, training=True)
-            d_loss_real = tf.losses.softmax_cross_entropy(y, real_out)
-            #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
-            #d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out, weights=weights)
-            #d_loss_real *= d_loss_real # square hinge
-            d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(y, real_out))
-            
-            gen_out = discrim(gen_x, training=True)
-            y = all_fake_y
-            d_loss_fake = tf.losses.softmax_cross_entropy(y, gen_out)
-            #d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
-            #d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out, weights=weights)
-            #d_loss_fake *= d_loss_fake # square hinge
-            d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, gen_out))
-            
-            #d_loss = tf.reduce_mean(d_loss_real + d_loss_fake)
-            d_loss = d_loss_real + d_loss_fake
-            #d_loss *= 0.5
-            
-            # call regularizer from https://github.com/rothk/Stabilizing_GANs
-            #disc_reg = Discriminator_Regularizer(real_out, x, gen_out, gen_x, tape)
-            #disc_reg = (gamma/2.0)*disc_reg
-            #d_loss += disc_reg
-            
-            g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
-            #g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
-            #g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out, weights=weights)
-            #g_loss *= g_loss # square hinge
-            g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, gen_out))
-            
-            #x_gen_input = gen_input_batch(real_y) # same classes, different noise
-            #gen_x = gen(x_gen_input, training=True)
-            #gen_out = discrim(gen_x, training=True)
-            #g_loss += tf.losses.softmax_cross_entropy(real_y, gen_out)
-            #g_loss += tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
-            #g_loss = tf.reduce_mean(g_loss)
-            #g_loss *= 0.5
+                real_out = discrim(x, training=True)
+                d_loss_real = tf.losses.softmax_cross_entropy(real_y, real_out)
+                #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
+                #d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out, weights=weights)
+                #d_loss_real *= d_loss_real # square hinge
+                d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, real_out))
+                
+                if d_step == 1:
+                    gen_out = discrim(gen_x, training=True)
+                    d_loss_fake = tf.losses.softmax_cross_entropy(all_fake_y, gen_out)
+                    #d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
+                    #d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out, weights=weights)
+                    #d_loss_fake *= d_loss_fake # square hinge
+                    d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, gen_out))
+                    
+                    #d_loss = tf.reduce_mean(d_loss_real + d_loss_fake)
+                    d_loss = d_loss_real + d_loss_fake
+                    d_loss *= 0.5
+                
+                    # call regularizer from https://github.com/rothk/Stabilizing_GANs
+                    #disc_reg = Discriminator_Regularizer(real_out, x, gen_out, gen_x, tape)
+                    #disc_reg = (gamma/2.0)*disc_reg
+                    #d_loss += disc_reg
 
+                    g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
+                    #g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
+                    #g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out, weights=weights)
+                    #g_loss *= g_loss # square hinge
+                    g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, gen_out))
+                    
+                    #x_gen_input = gen_input_batch(real_y) # same classes, different noise
+                    #gen_x = gen(x_gen_input, training=True)
+                    #gen_out = discrim(gen_x, training=True)
+                    #g_loss += tf.losses.softmax_cross_entropy(real_y, gen_out)
+                    #g_loss += tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
+                    #g_loss = tf.reduce_mean(g_loss)
+                    #g_loss *= 0.5
+                else:
+                    d_loss = d_loss_real
+
+                
+            gradients_of_discriminator = dtape.gradient(d_loss, discrim.variables)
+            apply_discrim_gradients(gradients_of_discriminator, discrim)
             
-        gradients_of_generator = tape.gradient(g_loss, gen.variables)
-        #gradients_of_generator = tf.gradients(g_loss, gen.variables)
-        gradients_of_discriminator = tape.gradient(d_loss, discrim.variables)
-        #gradients_of_discriminator = tf.gradients(d_loss, discrim.variables)        
-
-        apply_gradients(gradients_of_generator, gen, gradients_of_discriminator, discrim)
-
-        
+            if d_step == 1: 
+                gradients_of_generator = gtape.gradient(g_loss, gen.variables)
+                apply_gen_gradients(gradients_of_generator, gen)
+            else:
+                real2_msg = "REAL2: {:.7f}, acc: {:.3f}".format(d_loss_real, d_acc_real/batch_size)
+                
         end = timer()
         batches_timed += 1
         total_time += (end - start)
@@ -627,22 +721,28 @@ for epoch in range(start_epoch,EPOCHS+1):
         
         writer.flush()
         
-        print("{} / {}".format(batch_num, batches))
-        print("REAL: {:.3f}, acc: {:.3f}".format(d_loss_real, d_acc_real/batch_size))
-        print("FAKE: {:.3f}, acc: {:.3f}".format(d_loss_fake, d_acc_fake/batch_size))
+        print("epoch {}; batch {} / {}".format(epoch, batch_num, batches))
+        print("REAL:  {:.7f}, acc: {:.3f}".format(d_loss_real, d_acc_real/batch_size))
+        if real2_msg != None: print(real2_msg)
+        print("FAKE:  {:.7f}, acc: {:.3f}".format(d_loss_fake, d_acc_fake/batch_size))
         #print("final d_loss: {}, regularizer delta: {}".format((d_loss), disc_reg))
-        print("G_LOSS: {:.3f}, acc: {:.3f}".format((g_loss), g_acc/batch_size))
+        print("G_LOSS: {:.7f}, acc: {:.3f}".format((g_loss), g_acc/batch_size))
         #print("mean d grads: {:.8f}, mean g grads: {:.8f}".format(tf.reduce_mean(gradients_of_generator), tf.reduce_mean(gradients_of_discriminator)))
         print("batch time: {:.3f}, total_time: {:.3f}, mean time: {:.3f}\n".format(end-start, total_time, total_time / batches_timed))
         
-    if epoch > 100:
-        d_learning_rate.assign(d_learning_rate * 0.997)
-        g_learning_rate.assign(g_learning_rate * 0.997)
+        global_step.assign_add(1)
+        
+        
+    if epoch > 150:
+        d_learning_rate.assign(d_learning_base_rate * (0.997 ** (epoch-150)))
+        g_learning_rate.assign(g_learning_base_rate * (0.997 ** (epoch-150)))
         print("d_learning_rate = {}, g_learning_rate = {}".format(d_learning_rate.numpy(), g_learning_rate.numpy()))
+
+    #gaussian_rate.assign(base_gaussian_noise * (0.997 ** epoch))
         
     sample(epoch)
-    if epoch % 5 == 0:
-        tag = tags[epoch % len(tags)]
+    if epoch % 4 == 0:
+        tag = tags[int(epoch/4) % len(tags)]
         gen.save(GEN_WEIGHTS.format(tag))
         discrim.save(DISCRIM_WEIGHTS.format(tag))
     
