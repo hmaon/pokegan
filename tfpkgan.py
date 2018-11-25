@@ -43,7 +43,7 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 20,
+tf.app.flags.DEFINE_integer('batch_size', 40,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
@@ -81,20 +81,22 @@ writer = tf.contrib.summary.create_file_writer(save_path)
     
 EPOCHS = 5000
 d_learning_base_rate = 0.0002
-g_learning_base_rate = 0.0004
+g_learning_base_rate = 0.0005
 #base_gaussian_noise = .1
 
 #METRICS=[keras.metrics.categorical_accuracy]
 
 #INIT=tf.initializers.orthogonal(dtype = dtype)
 INIT='orthogonal'
-PRELUINIT=keras.initializers.Constant(value=0.3)
+PRELUINIT=keras.initializers.Constant(value=0.2)
 #g_batchnorm_constraint = MinMaxNorm(min_value=-1.0, max_value=1.0, rate=1.0, axis=[0])
 g_batchnorm_constraint = None
 
 GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
 
+VIRTUAL_BATCH_SIZE=5
+RENORM=True
 
 load_disc=None
 load_gen=None
@@ -191,22 +193,22 @@ def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same'
     dtensor = Conv2D(depth, 3, strides=1,\
                               padding='same',\
                               kernel_initializer=INIT)(dtensor)
-    dtensor = LeakyReLU()(dtensor)
-    dtensor = BatchNormalization()(dtensor)
+    dtensor = LeakyReLU(0.2)(dtensor)
+    dtensor = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(dtensor)
     
     # strided higher level feature detection
     dtensor = Conv2D(depth, 3, strides=stride,\
                               padding=stridedPadding,\
                               kernel_initializer=INIT)(dtensor)
-    dtensor = LeakyReLU()(dtensor)
-    dtensor = BatchNormalization()(dtensor)
+    dtensor = LeakyReLU(0.2)(dtensor)
+    dtensor = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(dtensor)
     if maxpool:
         dtensor = MaxPool2D(padding='same')(dtensor)
         
     # nonsense?
     #dtensor = Conv2D(depth, 1, kernel_initializer=INIT)(dtensor)
-    #dtensor = LeakyReLU()(dtensor)
-    #dtensor = BatchNormalization()(dtensor)    
+    #dtensor = LeakyReLU(0.2)(dtensor)
+    #dtensor = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(dtensor)    
     return dtensor
 
 # unused
@@ -216,37 +218,37 @@ def res_d_block(dtensor, depth, stride = 1, stridedPadding='same'):
         dtensor = Conv2D(depth, 3, strides=stride,\
                                   padding=stridedPadding,\
                                   kernel_initializer=INIT)(dtensor)
-        dtensor = LeakyReLU()(dtensor)
-        dtensor = BatchNormalization()(dtensor)
+        dtensor = LeakyReLU(0.2)(dtensor)
+        dtensor = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(dtensor)
 
     short = dtensor
     
     dtensor = Conv2D(depth, 3, strides=1,\
                               padding='same',\
                               kernel_initializer=INIT)(dtensor)
-    dtensor = LeakyReLU()(dtensor)
-    dtensor = BatchNormalization()(dtensor)
+    dtensor = LeakyReLU(0.2)(dtensor)
+    dtensor = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(dtensor)
 
     dtensor = Conv2D(depth, 3, strides=1,\
                               padding='same',\
                               kernel_initializer=INIT)(dtensor)
-    dtensor = LeakyReLU()(dtensor)
-    dtensor = BatchNormalization()(dtensor)
+    dtensor = LeakyReLU(0.2)(dtensor)
+    dtensor = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(dtensor)
 
     # diagram at https://towardsdatascience.com/an-overview-of-resnet-and-its-variants-5281e2f56035 ... seems weird but who am I to argue
     #if stride == 2:
     #    short = MaxPooling2D()(short)
-    short = LeakyReLU()(short)  
-    short = BatchNormalization()(short)    
+    short = LeakyReLU(0.2)(short)  
+    short = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(short)    
     
     short = SeparableConv2D(depth, 1)(short) 
     #short = PReLU()(short)
-    short = LeakyReLU()(short)  
-    short = BatchNormalization()(short)    
+    short = LeakyReLU(0.2)(short)  
+    short = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(short)    
     
     short = SeparableConv2D(depth, 1)(short)
-    short = LeakyReLU()(short)
-    short = BatchNormalization()(short)        
+    short = LeakyReLU(0.2)(short)
+    short = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(short)        
         
     return Add()([dtensor, short])
 
@@ -258,17 +260,17 @@ def Discriminator():
     
     inp = Input((64,64,3))    
     
-    d = LeakyReLU(0.05)(inp) # clip negative input values from generator, as they're also clipped in image sampling
+    d = LeakyReLU(0.2)(inp) # clip negative input values from generator, as they're also clipped in image sampling
     
     d = GaussianNoise(.15)(d)
         
     d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, strides=1)(d) # 64x64
-    BatchNormalization()(d)
-    LeakyReLU()(d)          
+    BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(d)
+    LeakyReLU(0.2)(d)          
 
     d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, strides=2)(d) # 32x32
-    BatchNormalization()(d)
-    LeakyReLU()(d)          
+    BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(d)
+    LeakyReLU(0.2)(d)          
     
     d = res_d_block(d, 64, 2) # 16x16
     d = res_d_block(d, 64, 1)     
@@ -293,8 +295,8 @@ def Discriminator():
     d = Flatten()(d)
     
     d = Dense(512, kernel_initializer=INIT)(d)
-    d = LeakyReLU()(d)
-    d = BatchNormalization()(d)
+    d = LeakyReLU(0.2)(d)
+    d = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(d)
     
     # classify ??    
     d = Dense(num_classes, kernel_initializer=INIT)(d)
@@ -377,21 +379,24 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=True)
     if deconvolve:
         conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, dtype=dtype)(conv)
         conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)     
-        conv = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
+        conv = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
         
     #conv = SeparableConv2D(depth, size, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
     #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)  
-    #conv = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
+    #conv = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
     
 
-    #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
+    conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
     #conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
-    #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)  
-    #conv = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+    conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)
+    
+    #conv = Add()([conv, h])
+    
+    conv = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
 
     conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
     conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)  
-    conv = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
+    conv = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
     
     return conv
     
@@ -405,16 +410,19 @@ def Generator():
     zc = UpSampling2D()(zc) # 4x4
     zc = UpSampling2D()(zc) # 8x8
 
-    g = Dense(512, kernel_initializer=INIT)(g)
-    g = PReLU(alpha_initializer=PRELUINIT)(g)
-    g = BatchNormalization()(g)
+    #g = Dense(512, kernel_initializer=INIT)(g)
+    #g = PReLU(alpha_initializer=PRELUINIT)(g)
+    #g = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(g)
 
-    g = Dense(2*2*512, kernel_initializer=INIT, dtype=dtype)(g)
-    g = PReLU(alpha_initializer=PRELUINIT)(g)
-    g = BatchNormalization(beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
+    #g = Dense(2*2*512, kernel_initializer=INIT, dtype=dtype)(g)
+    #g = PReLU(alpha_initializer=PRELUINIT)(g)
+    #g = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
     
-    g = Reshape(target_shape=(2,2,512))(g)
+    #g = Reshape(target_shape=(2,2,512))(g)
+    g = Reshape(target_shape=(1,1,NOISE+num_classes))(g)
 
+    g = g_block(g, 2048, 2, size=3, upsample=False)
+    
     g = g_block(g, 1024, 2, size=3, upsample=False) # 4x4
     
     g = g_block(g, 512, 2, size=3, upsample=False) # 8x8
@@ -427,38 +435,38 @@ def Generator():
     
     #zc = UpSampling2D()(zc) # 32x32
     
-    g = g_block(g, 128, 2, size=3, upsample=True, deconvolve=False)  # 32x32
+    g = g_block(g, 128, 2, size=3, upsample=False, deconvolve=True)  # 32x32
     
     #g = Concatenate()([g,zc])
     
-    g = g_block(g, 128, 2, size=3, upsample=True, deconvolve=False) # 64x64
+    g = g_block(g, 128, 2, size=3, upsample=False, deconvolve=True) # 64x64
 
     # I don't know what these are supposed to do but whatever:
     #g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
 
     #g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
 
-    g = Conv2D(256, 3, padding='same', kernel_initializer=INIT)(g)    
+    #g = Conv2D(256, 3, padding='same', kernel_initializer=INIT)(g)    
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
-    g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(g)
-    g = BatchNormalization()(g)
+    #g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(g)
+    #g = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(g)
 
     #g = Conv2D(256, 1, padding='same', kernel_initializer=INIT)(g)    
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)    
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
     #g = LeakyReLU(0.1)(g)
-    #g = BatchNormalization()(g)    
+    #g = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(g)    
     
     #g = Conv2DTranspose(256, 3, padding='same', kernel_initializer=INIT)(g)
     #g = PReLU()(g)
-    #g = BatchNormalization()(g)
+    #g = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(g)
     
     #g = Conv2D(128, 1, padding='same', kernel_initializer=INIT)(g)
     #g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(g)
-    #g = BatchNormalization()(g)
+    #g = BatchNormalization(virtual_batch_size=VIRTUAL_BATCH_SIZE, renorm=RENORM, )(g)
     
     #print(g.shape)
-    g = Conv2D(3, 1, activation='sigmoid', padding='same')(g)
+    g = Conv2D(3, 1, activation='tanh', padding='same')(g)
     g = Reshape((64, 64, 3))(g) 
     
     gen = Model(inputs=input, outputs=g)
@@ -544,11 +552,11 @@ def render(all_out, filenum=0):
 def sample(filenum=0):
     all_out = []
     classes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
-    print(len(classes))
+    print("[sample()] num classes: ", len(classes))
     _classidx=0
-    for i in range(3):
-        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+12)], clipping=0.5)
-        _classidx += 12
+    for i in range(4):
+        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+VIRTUAL_BATCH_SIZE*2)], clipping=0.5)
+        _classidx += VIRTUAL_BATCH_SIZE*2
         print(inp.shape)
         batch_out = tf.nn.relu(gen.predict(inp)).numpy()
         print(batch_out.shape)
@@ -585,7 +593,7 @@ discrim_optimizer = AdamOptimizer(learning_rate=d_learning_rate, beta1=0.5)
 #adver.compile(optimizer=RMSPropOptimizer(learning_rate=0.002), loss='kullback_leibler_divergence', metrics=METRICS) 
 
 ### some instrumentation
-render(next_batch()[0], -99)
+render(next_batch()[0], -99999)
 sample(0)
 #train_generator.reset()
 #exit()
@@ -633,9 +641,8 @@ for epoch in range(start_epoch,EPOCHS+1):
         
         # get real data
         x,y = next_batch()
-        #x = tf.convert_to_tensor(x) # this sucks actually
+        x = tf.convert_to_tensor(x) 
         if len(y) != train_gen.batch_size:
-            render(x, -99)
             continue # avoid re-analysis of ops due to changing batch sizes; maybe was only relevant in plaidml? not sure
         
         y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype)
@@ -650,33 +657,47 @@ for epoch in range(start_epoch,EPOCHS+1):
         for d_step in range(2):
             with tf.GradientTape() as dtape, tf.GradientTape() as gtape:
                 #tape.watch(x)
-                x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
-                gen_x = gen(x_gen_input, training=True)
-
-                real_out = discrim(x, training=True)
-                d_loss_real = tf.losses.softmax_cross_entropy(real_y, real_out)
-                #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
-                #d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out, weights=weights)
-                #d_loss_real *= d_loss_real # square hinge
-                d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, real_out))
                 
-                if d_step == 1:
-                    gen_out = discrim(gen_x, training=True)
-                    d_loss_fake = tf.losses.softmax_cross_entropy(all_fake_y, gen_out)
+                if d_step == 0:
+                    real_out = discrim(x, training=True)
+                    d_loss = tf.losses.softmax_cross_entropy(real_y, real_out)
+                    #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
+                    #d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out, weights=weights)
+                    #d_loss_real *= d_loss_real # square hinge
+                    d_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, real_out))                
+                if d_step == 1:                    
+                    x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
+                    gen_x = gen(x_gen_input, training=True)
+
+                    cumulative_x = tf.concat([x, gen_x], -4)
+                    
+                    #print("shape cumulative_x: ", cumulative_x.numpy().shape)
+                    #render(cumulative_x.numpy(), -7777)
+                    #render(cumulative_x[len(real_y):].numpy(), -7778)
+                    
+                    cumulative_RF_y = tf.concat([real_y, all_fake_y], -2)
+                    #print("shape cumulative_RF_y: ", cumulative_RF_y.numpy().shape)
+
+                    out = discrim(cumulative_x, training=True)
+                    
+                    d_loss = tf.losses.softmax_cross_entropy(cumulative_RF_y, out)
                     #d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=all_fake_y)
                     #d_loss_fake = tf.losses.hinge_loss(labels=all_fake_y, logits=gen_out, weights=weights)
                     #d_loss_fake *= d_loss_fake # square hinge
-                    d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, gen_out))
+                    d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, out[:len(real_y)]))
+                    d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(all_fake_y, out[len(real_y):]))
                     
                     #d_loss = tf.reduce_mean(d_loss_real + d_loss_fake)
-                    d_loss = d_loss_real + d_loss_fake
-                    d_loss *= 0.5
+                    #d_loss = d_loss_real + d_loss_fake
+                    #d_loss *= 0.5
                 
                     # call regularizer from https://github.com/rothk/Stabilizing_GANs
                     #disc_reg = Discriminator_Regularizer(real_out, x, gen_out, gen_x, tape)
                     #disc_reg = (gamma/2.0)*disc_reg
                     #d_loss += disc_reg
 
+                    gen_out = out[len(real_y):]
+                    #print("gen_out shape ", gen_out.numpy().shape)
                     g_loss = tf.losses.softmax_cross_entropy(real_y, gen_out)
                     #g_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
                     #g_loss = tf.losses.hinge_loss(labels=real_y, logits=gen_out, weights=weights)
@@ -690,8 +711,6 @@ for epoch in range(start_epoch,EPOCHS+1):
                     #g_loss += tf.nn.sigmoid_cross_entropy_with_logits(logits=gen_out, labels=real_y)
                     #g_loss = tf.reduce_mean(g_loss)
                     #g_loss *= 0.5
-                else:
-                    d_loss = d_loss_real
 
                 
             gradients_of_discriminator = dtape.gradient(d_loss, discrim.variables)
@@ -701,19 +720,19 @@ for epoch in range(start_epoch,EPOCHS+1):
                 gradients_of_generator = gtape.gradient(g_loss, gen.variables)
                 apply_gen_gradients(gradients_of_generator, gen)
             else:
-                real2_msg = "REAL2: {:.7f}, acc: {:.3f}".format(d_loss_real, d_acc_real/batch_size)
+                real2_msg = "REAL2: {:.7f}, acc: {:.3f}".format(d_loss, d_acc/batch_size)
                 
         end = timer()
         batches_timed += 1
         total_time += (end - start)
         
-        d_loss_real = tf.reduce_mean(d_loss_real)
-        d_loss_fake = tf.reduce_mean(d_loss_fake)
+        #d_loss_real = tf.reduce_mean(d_loss_real)
+        #d_loss_fake = tf.reduce_mean(d_loss_fake)
         with writer.as_default():
             with tf.contrib.summary.always_record_summaries():
-                tf.contrib.summary.scalar("d_loss_real", d_loss_real)
+                tf.contrib.summary.scalar("d_loss", d_loss)
                 tf.contrib.summary.scalar("d_accuracy_real", d_acc_real/batch_size)
-                tf.contrib.summary.scalar("d_loss_fake", d_loss_fake)
+                #tf.contrib.summary.scalar("d_loss_fake", d_loss_fake)
                 tf.contrib.summary.scalar("d_accuracy_fake", d_acc_fake/batch_size)
                 tf.contrib.summary.scalar("g_loss", g_loss)
                 tf.contrib.summary.scalar("g_accuracy", g_acc/batch_size)
@@ -722,11 +741,12 @@ for epoch in range(start_epoch,EPOCHS+1):
         writer.flush()
         
         print("epoch {}; batch {} / {}".format(epoch, batch_num, batches))
-        print("REAL:  {:.7f}, acc: {:.3f}".format(d_loss_real, d_acc_real/batch_size))
+        print("d_loss: {:.7f}".format(d_loss)) 
+        print("real acc: {:.3f}".format(d_acc_real/batch_size))
         if real2_msg != None: print(real2_msg)
-        print("FAKE:  {:.7f}, acc: {:.3f}".format(d_loss_fake, d_acc_fake/batch_size))
+        print("fake acc: acc: {:.3f}".format(d_acc_fake/batch_size))
         #print("final d_loss: {}, regularizer delta: {}".format((d_loss), disc_reg))
-        print("G_LOSS: {:.7f}, acc: {:.3f}".format((g_loss), g_acc/batch_size))
+        print("g_loss: {:.7f}, acc: {:.3f}".format((g_loss), g_acc/batch_size))
         #print("mean d grads: {:.8f}, mean g grads: {:.8f}".format(tf.reduce_mean(gradients_of_generator), tf.reduce_mean(gradients_of_discriminator)))
         print("batch time: {:.3f}, total_time: {:.3f}, mean time: {:.3f}\n".format(end-start, total_time, total_time / batches_timed))
         
