@@ -62,6 +62,7 @@ batch_size = FLAGS.batch_size
                            
 dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
 npdtype = np.float16 if FLAGS.use_fp16 else np.float32
+channels_shape=(3,64,64) # not bothering to set this from global config right now
                             
 from tensorflow.keras.backend import set_session
 config = tf.ConfigProto(intra_op_parallelism_threads=0, inter_op_parallelism_threads=0)
@@ -97,7 +98,7 @@ GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
 
 #VIRTUAL_BATCH_SIZE=batch_size
-RENORM=False
+RENORM=True
 BATCH2D_AXIS=1
 
 load_disc=None
@@ -183,6 +184,55 @@ def next_batch():
 loadThread = LoadThread(flowQueue, train_gen)
 loadThread.daemon = True
 loadThread.start()
+
+def img_float_to_uint8(img, do_reshape=True):
+    out = img
+    if do_reshape: out = out.reshape(channels_shape)
+    out = np.uint8(out * 255)
+    return out
+    
+def img_uint8_to_float(img):
+    img = dtype(img)
+    img *= 1./255
+    return img
+
+def img_quantize(img): # img is a Tensor 
+    g = img
+    g = tf.math.multiply(tf.constant(255.), g)
+    #g = tf.math.floor(g) # quantize
+    g = tf.math.multiply(tf.constant(1./255), g)            
+    return g
+
+# save a grid of images to a file
+def render(all_out, filenum=0):            
+    pad = 3
+    swatchdim = 64 # 64x64 is the output of the generator
+    swatches = 6 # per side
+    dim = (pad+swatchdim) * swatches
+    img = PIL.Image.new("RGB", (dim, dim), "white")
+
+    for i in range(min(swatches * swatches, len(all_out))):
+        out = all_out[i]
+        out = img_float_to_uint8(out)
+        #print("pre-move shape ", out.shape)
+        out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
+        #print("check this: ", out.shape)
+        swatch = PIL.Image.fromarray(out)
+        x = i % swatches
+        y = math.floor(i/swatches)
+        #print((x,y))
+        img.paste(swatch, (x * (pad+swatchdim), y * (pad+swatchdim)))
+
+    img.save('out%d.png' %(filenum,))
+    #ima = np.array(img).flatten()
+    #ima = ima[:batch_size*swatchdim*swatchdim*3]
+    #print("ima.shape: {}".format(ima.shape))
+    #with writer.as_default():
+    #    with tf.contrib.summary.always_record_summaries():
+    #        tf.contrib.summary.image("sample", ima.reshape((batch_size,swatchdim,swatchdim,3)))
+
+#test rendering and loading
+render(next_batch()[0], -99999)
     
 ###
 ### D I S C R I M I N A T O R
@@ -259,7 +309,7 @@ def res_d_block(dtensor, depth, stride = 1, stridedPadding='same'):
 def Discriminator():
     dense_dropout = 0.1
     
-    inp = Input((64,64,3))    
+    inp = Input(channels_shape)    
     
     d = LeakyReLU(0.2)(inp) # clip negative input values from generator, as they're also clipped in image sampling
     
@@ -372,7 +422,7 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
 ### G E N E R A T O R
 ###
 
-def g_block(gtensor, depth=32, stride=1, size=5, upsample=True, deconvolve=False):
+def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=False):
     conv = gtensor
     if upsample: 
         conv = UpSampling2D(dtype=dtype)(conv)
@@ -436,18 +486,18 @@ def Generator():
     
     #zc = UpSampling2D()(zc) # 32x32
     
-    g = g_block(g, 128, 2)  # 32x32
+    g = g_block(g, 128, 2, size=5)  # 32x32
     
     #g = Concatenate()([g,zc])
     
-    g = g_block(g, 64, 2) # 64x64
+    g = g_block(g, 64, 2, size=5) # 64x64
 
     # I don't know what these are supposed to do but whatever:
     #g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
 
     #g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
 
-    g = Conv2D(64, 3, padding='same', kernel_initializer=INIT)(g)    
+    g = Conv2D(64, 5, padding='same', kernel_initializer=INIT)(g)    
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
     g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(g)
     g = BatchNormalization(axis=1, renorm=RENORM, )(g)
@@ -464,7 +514,7 @@ def Generator():
     
     #print(g.shape)
     g = Conv2D(3, 1, activation='tanh', padding='same')(g)
-    g = Reshape((64, 64, 3))(g) 
+    g = Reshape(channels_shape)(g) 
     
     gen = Model(inputs=input, outputs=g)
     gen.summary()
@@ -501,55 +551,11 @@ def gen_input_batch(classes=None, clipping=.95):
     print("!!! Generating random batch in gen_input_batch()!")
     return np.array([gen_input_rand(clipping) for x in range(batch_size)], dtype=npdtype)
 
-def img_float_to_uint8(img, do_reshape=True):
-    out = img
-    if do_reshape: out = out.reshape(64, 64, 3)
-    out = np.uint8(out * 255)
-    return out
-    
-def img_uint8_to_float(img):
-    img = dtype(img)
-    img *= 1./255
-    return img
-
-def img_quantize(img): # img is a Tensor 
-    g = img
-    g = tf.math.multiply(tf.constant(255.), g)
-    #g = tf.math.floor(g) # quantize
-    g = tf.math.multiply(tf.constant(1./255), g)            
-    return g
-    
-def render(all_out, filenum=0):            
-    pad = 3
-    swatchdim = 64 # 64x64 is the output of the generator
-    swatches = 6 # per side
-    dim = (pad+swatchdim) * swatches
-    img = PIL.Image.new("RGB", (dim, dim), "white")
-
-    for i in range(min(swatches * swatches, len(all_out))):
-        out = all_out[i]
-        out = img_float_to_uint8(out)
-        out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
-        #print("check this: ")
-        #print(out.shape)
-        swatch = PIL.Image.fromarray(out)
-        x = i % swatches
-        y = math.floor(i/swatches)
-        #print((x,y))
-        img.paste(swatch, (x * (pad+swatchdim), y * (pad+swatchdim)))
-
-    img.save('out%d.png' %(filenum,))
-    #ima = np.array(img).flatten()
-    #ima = ima[:batch_size*swatchdim*swatchdim*3]
-    #print("ima.shape: {}".format(ima.shape))
-    #with writer.as_default():
-    #    with tf.contrib.summary.always_record_summaries():
-    #        tf.contrib.summary.image("sample", ima.reshape((batch_size,swatchdim,swatchdim,3)))
-    
+        
 def sample(filenum=0):
     all_out = []
     classes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
-    print("[sample()] num classes: ", len(classes))
+    #print("[sample()] num classes: ", len(classes))
     _classidx=0
     for i in range(4):
         inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+10)], clipping=0.5)
@@ -590,7 +596,6 @@ discrim_optimizer = AdamOptimizer(learning_rate=d_learning_rate, beta1=0.5)
 #adver.compile(optimizer=RMSPropOptimizer(learning_rate=0.002), loss='kullback_leibler_divergence', metrics=METRICS) 
 
 ### some instrumentation
-render(next_batch()[0], -99999)
 sample(0)
 #train_generator.reset()
 #exit()
@@ -688,7 +693,7 @@ for epoch in range(start_epoch,EPOCHS+1):
                     gen_out = tf.concat([gen_out_a, gen_out_b], -2)
                     cumulative_real_y = tf.concat([half_real_y, real_y], axis=-2)
 
-                    print("shape check, gen_out_b ", gen_out_b.numpy().shape, "gen_out ", gen_out.numpy().shape, "cumulative_real_y ", cumulative_real_y.numpy().shape)
+                    #print("shape check, gen_out_b ", gen_out_b.numpy().shape, "gen_out ", gen_out.numpy().shape, "cumulative_real_y ", cumulative_real_y.numpy().shape)
                     
                     g_loss = tf.losses.softmax_cross_entropy(cumulative_real_y, gen_out)
                     g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(cumulative_real_y, gen_out))
