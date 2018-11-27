@@ -43,7 +43,7 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 20,
+tf.app.flags.DEFINE_integer('batch_size', 30,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
@@ -62,7 +62,9 @@ batch_size = FLAGS.batch_size
                            
 dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
 npdtype = np.float16 if FLAGS.use_fp16 else np.float32
-channels_shape=(3,64,64) # not bothering to set this from global config right now
+
+data_format=tf.keras.backend.image_data_format()
+channels_shape = (3,64,64) if data_format == 'channels_first' else (64,64,3)
                             
 from tensorflow.keras.backend import set_session
 config = tf.ConfigProto(intra_op_parallelism_threads=0, inter_op_parallelism_threads=0)
@@ -98,7 +100,7 @@ GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
 
 #VIRTUAL_BATCH_SIZE=batch_size
-RENORM=True
+RENORM=False
 BATCH2D_AXIS=1
 
 load_disc=None
@@ -139,97 +141,97 @@ def rangeshift(inp):
     #print(inp)
     return inp
 
-    
-ImageDatagen = ImageDataGenerator(
-        rescale=1./255,
-        width_shift_range=7,
-        height_shift_range=7,
-        zoom_range=0.1,
-        fill_mode='wrap',
-        cval=255,
-        horizontal_flip=True,
-        data_format='channels_first',
-        dtype=dtype)
+with tf.device('/cpu:0'):    
+    ImageDatagen = ImageDataGenerator(
+            rescale=1./255,
+            width_shift_range=7,
+            height_shift_range=7,
+            zoom_range=0.1,
+            fill_mode='wrap',
+            cval=255,
+            horizontal_flip=True,
+            data_format='channels_first',
+            dtype=dtype)
 
-train_gen = ImageDatagen.flow_from_directory(
-        FLAGS.data_dir,
-        target_size=(64, 64),
-        batch_size=batch_size,
-        class_mode='sparse',
-        interpolation='lanczos')
+    train_gen = ImageDatagen.flow_from_directory(
+            FLAGS.data_dir,
+            target_size=(64, 64),
+            batch_size=batch_size,
+            class_mode='sparse',
+            interpolation='lanczos')
 
-num_classes = train_gen.num_classes + 1 # classes + fake
+    num_classes = train_gen.num_classes + 1 # classes + fake
 
-flowQueue = queue.Queue(5)
+    flowQueue = queue.Queue(5)
 
-class LoadThread(threading.Thread):
-    def __init__(self, q, datagen):
-        threading.Thread.__init__(self)
-        self.q = q
-        self.datagen = datagen
+    class LoadThread(threading.Thread):
+        def __init__(self, q, datagen):
+            threading.Thread.__init__(self)
+            self.q = q
+            self.datagen = datagen
 
-    def run(self):
-        print ("Starting image data loader thread")
-        while True:
-            while self.q.full():
-                time.sleep(.05)
-            self.q.put(self.datagen.next())
+        def run(self):
+            print ("Starting image data loader thread")
+            while True:
+                while self.q.full():
+                    time.sleep(.05)
+                self.q.put(self.datagen.next())
 
-def next_batch():
-    while flowQueue.empty():
-        time.sleep(.05)
-    ret = flowQueue.get()
-    return ret
+    def next_batch():
+        while flowQueue.empty():
+            time.sleep(.05)
+        ret = flowQueue.get()
+        return ret
 
-loadThread = LoadThread(flowQueue, train_gen)
-loadThread.daemon = True
-loadThread.start()
+    loadThread = LoadThread(flowQueue, train_gen)
+    loadThread.daemon = True
+    loadThread.start()
 
-def img_float_to_uint8(img, do_reshape=True):
-    out = img
-    if do_reshape: out = out.reshape(channels_shape)
-    out = np.uint8(out * 255)
-    return out
-    
-def img_uint8_to_float(img):
-    img = dtype(img)
-    img *= 1./255
-    return img
+    def img_float_to_uint8(img, do_reshape=True):
+        out = img
+        if do_reshape: out = out.reshape(channels_shape)
+        out = np.uint8(out * 255)
+        return out
+        
+    def img_uint8_to_float(img):
+        img = dtype(img)
+        img *= 1./255
+        return img
 
-def img_quantize(img): # img is a Tensor 
-    g = img
-    g = tf.math.multiply(tf.constant(255.), g)
-    #g = tf.math.floor(g) # quantize
-    g = tf.math.multiply(tf.constant(1./255), g)            
-    return g
+    def img_quantize(img): # img is a Tensor 
+        g = img
+        g = tf.math.multiply(tf.constant(255.), g)
+        #g = tf.math.floor(g) # quantize
+        g = tf.math.multiply(tf.constant(1./255), g)            
+        return g
 
-# save a grid of images to a file
-def render(all_out, filenum=0):            
-    pad = 3
-    swatchdim = 64 # 64x64 is the output of the generator
-    swatches = 6 # per side
-    dim = (pad+swatchdim) * swatches
-    img = PIL.Image.new("RGB", (dim, dim), "white")
+    # save a grid of images to a file
+    def render(all_out, filenum=0):            
+        pad = 3
+        swatchdim = 64 # 64x64 is the output of the generator
+        swatches = 6 # per side
+        dim = (pad+swatchdim) * swatches
+        img = PIL.Image.new("RGB", (dim, dim), "white")
 
-    for i in range(min(swatches * swatches, len(all_out))):
-        out = all_out[i]
-        out = img_float_to_uint8(out)
-        #print("pre-move shape ", out.shape)
-        out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
-        #print("check this: ", out.shape)
-        swatch = PIL.Image.fromarray(out)
-        x = i % swatches
-        y = math.floor(i/swatches)
-        #print((x,y))
-        img.paste(swatch, (x * (pad+swatchdim), y * (pad+swatchdim)))
+        for i in range(min(swatches * swatches, len(all_out))):
+            out = all_out[i]
+            out = img_float_to_uint8(out)
+            #print("pre-move shape ", out.shape)
+            out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
+            #print("check this: ", out.shape)
+            swatch = PIL.Image.fromarray(out)
+            x = i % swatches
+            y = math.floor(i/swatches)
+            #print((x,y))
+            img.paste(swatch, (x * (pad+swatchdim), y * (pad+swatchdim)))
 
-    img.save('out%d.png' %(filenum,))
-    #ima = np.array(img).flatten()
-    #ima = ima[:batch_size*swatchdim*swatchdim*3]
-    #print("ima.shape: {}".format(ima.shape))
-    #with writer.as_default():
-    #    with tf.contrib.summary.always_record_summaries():
-    #        tf.contrib.summary.image("sample", ima.reshape((batch_size,swatchdim,swatchdim,3)))
+        img.save('out%d.png' %(filenum,))
+        #ima = np.array(img).flatten()
+        #ima = ima[:batch_size*swatchdim*swatchdim*3]
+        #print("ima.shape: {}".format(ima.shape))
+        #with writer.as_default():
+        #    with tf.contrib.summary.always_record_summaries():
+        #        tf.contrib.summary.image("sample", ima.reshape((batch_size,swatchdim,swatchdim,3)))
 
 #test rendering and loading
 render(next_batch()[0], -99999)
@@ -313,13 +315,13 @@ def Discriminator():
     
     d = LeakyReLU(0.2)(inp) # clip negative input values from generator, as they're also clipped in image sampling
     
-    d = GaussianNoise(.15)(d)
+    d = GaussianNoise(.2)(d)
         
     d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, strides=1)(d) # 64x64
     BatchNormalization(axis=1, renorm=RENORM, )(d)
     LeakyReLU(0.2)(d)          
 
-    d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, strides=2)(d) # 32x32
+    d = Conv2D(64, 5, padding='same', kernel_initializer=INIT, strides=2)(d) # 32x32
     BatchNormalization(axis=1, renorm=RENORM, )(d)
     LeakyReLU(0.2)(d)          
     
@@ -351,7 +353,7 @@ def Discriminator():
     
     # classify ??    
     d = Dense(num_classes, kernel_initializer=INIT)(d)
-    #d = Softmax()(d) # calculated in softmax_cross_entropy() but not in hinge_loss()?
+    d = Softmax()(d) # calculated in softmax_cross_entropy() but not in hinge_loss()?
         
     discrim = Model(inputs=inp, outputs=d)    
 
@@ -429,24 +431,24 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=True, deconvolve=False
     
     if deconvolve:
         conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, dtype=dtype)(conv)
-        conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)     
+        conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)     
         conv = BatchNormalization(axis=1, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
         
     #conv = SeparableConv2D(depth, size, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
-    #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)  
+    #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)  
     #conv = BatchNormalization(axis=1, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
     
 
     #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(conv)
     conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, dtype=dtype)(conv)
-    conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)
+    conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)
     
     #conv = Add()([conv, h])
     
     conv = BatchNormalization(axis=1, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
 
     conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT)(conv)
-    conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(conv)  
+    conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)  
     conv = BatchNormalization(axis=1, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
     
     return conv
@@ -470,10 +472,10 @@ def Generator():
     g = BatchNormalization(renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
     
     #g = Reshape(target_shape=(2,2,1024))(g)
-    g = Reshape(target_shape=(1,1,1024))(g)
+    g = Reshape(target_shape=(1024,1,1))(g)
 
     g = g_block(g, 2048, 2)
-    
+    #print("2x2 shape? ", g.shape)
     g = g_block(g, 1024, 2) # 4x4
     
     g = g_block(g, 512, 2) # 8x8
@@ -486,20 +488,20 @@ def Generator():
     
     #zc = UpSampling2D()(zc) # 32x32
     
-    g = g_block(g, 128, 2, size=5)  # 32x32
+    g = g_block(g, 128, 2)  # 32x32
     
     #g = Concatenate()([g,zc])
     
-    g = g_block(g, 64, 2, size=5) # 64x64
+    g = g_block(g, 128, 2) # 64x64
 
     # I don't know what these are supposed to do but whatever:
     #g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
 
     #g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False) # 64x64
 
-    g = Conv2D(64, 5, padding='same', kernel_initializer=INIT)(g)    
+    g = Conv2D(128, 3, padding='same', kernel_initializer=INIT)(g)    
     #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT)(g)
-    g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(g)
+    g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)
     g = BatchNormalization(axis=1, renorm=RENORM, )(g)
 
     #g = Conv2D(256, 1, padding='same', kernel_initializer=INIT)(g)    
@@ -509,7 +511,7 @@ def Generator():
     #g = BatchNormalization(axis=1, renorm=RENORM, )(g)    
         
     #g = Conv2D(128, 1, padding='same', kernel_initializer=INIT)(g)
-    #g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[1,2])(g)
+    #g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)
     #g = BatchNormalization(axis=1, renorm=RENORM, )(g)
     
     #print(g.shape)
@@ -558,7 +560,7 @@ def sample(filenum=0):
     #print("[sample()] num classes: ", len(classes))
     _classidx=0
     for i in range(4):
-        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+10)], clipping=0.5)
+        inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+10)], clipping=0.75)
         _classidx += 10
         print(inp.shape)
         batch_out = tf.nn.relu(gen.predict(inp)).numpy()
@@ -650,7 +652,8 @@ for epoch in range(start_epoch,EPOCHS+1):
         y = real_y = np.array([keras.utils.to_categorical(cls, num_classes=num_classes) * 0.9 for cls in y], dtype=npdtype)
         all_fake_y = np.array([keras.utils.to_categorical(num_classes-1, num_classes = num_classes) * 0.9 for dummy in x], dtype=npdtype)
         
-        weights = tf.ones_like(y) * 0.75 + real_y * (.25/.9) + all_fake_y * (.25/.9)
+        #weights = tf.ones_like(y) * 0.75 + real_y * (.25/.9) + all_fake_y * (.25/.9)
+        #weights = real_y / .9 # applied only to generator; concentrate only on maximizing similarity to real output, not on beating discriminator at fake vs. real game
         
         for d_step in range(2):
             with tf.GradientTape() as dtape, tf.GradientTape() as gtape:
@@ -658,26 +661,27 @@ for epoch in range(start_epoch,EPOCHS+1):
                 
                 if d_step == 0:
                     real_out = discrim(x, training=True)
-                    d_loss = tf.losses.softmax_cross_entropy(real_y, real_out)
+                    #d_loss = tf.losses.softmax_cross_entropy(real_y, real_out)
                     #d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(logits=real_out, labels=y)
-                    #d_loss_real = tf.losses.hinge_loss(labels=y, logits=real_out, weights=weights)
+                    d_loss = tf.losses.hinge_loss(labels=real_y, logits=real_out)
                     #d_loss_real *= d_loss_real # square hinge
                     d_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, real_out))                
                 if d_step == 1:
-                    half_real_y = real_y[:len(real_y) >> 1]
-                    half_fake_y = all_fake_y[:len(half_real_y)]
-                    x_gen_input = gen_input_batch(half_real_y) # real classes with appended random noise inputs
+                    part_real_y = real_y[:len(real_y) >> 1]
+                    part_fake_y = all_fake_y[:len(part_real_y)]
+                    x_gen_input = gen_input_batch(real_y) # real classes with appended random noise inputs
                     gen_x = gen(x_gen_input, training=True)
 
-                    cumulative_x = tf.concat([x, gen_x[:len(half_fake_y)]], -4)
+                    cumulative_x = tf.concat([x, gen_x[:len(part_fake_y)]], -4)
                                         
-                    cumulative_RF_y = tf.concat([real_y, half_fake_y], -2)
+                    cumulative_RF_y = tf.concat([real_y, part_fake_y], -2)
 
                     out = discrim(cumulative_x, training=True)
                     
-                    d_loss = tf.losses.softmax_cross_entropy(cumulative_RF_y, out)
+                    #d_loss = tf.losses.softmax_cross_entropy(cumulative_RF_y, out)
+                    d_loss = tf.losses.hinge_loss(labels=cumulative_RF_y, logits=out)
                     d_acc_real = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, out[:len(real_y)]))
-                    d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(half_fake_y, out[len(real_y):]))
+                    d_acc_fake = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(part_fake_y, out[len(real_y):]))
                     
                 
                     # call regularizer from https://github.com/rothk/Stabilizing_GANs
@@ -691,11 +695,15 @@ for epoch in range(start_epoch,EPOCHS+1):
                     gen_x = gen(x_gen_input, training=True)
                     gen_out_b = discrim(gen_x, training=True)
                     gen_out = tf.concat([gen_out_a, gen_out_b], -2)
-                    cumulative_real_y = tf.concat([half_real_y, real_y], axis=-2)
+
+                    cumulative_real_y = tf.concat([part_real_y, real_y], axis=-2)
+                    #g_loss = tf.losses.softmax_cross_entropy(cumulative_real_y, gen_out)
 
                     #print("shape check, gen_out_b ", gen_out_b.numpy().shape, "gen_out ", gen_out.numpy().shape, "cumulative_real_y ", cumulative_real_y.numpy().shape)
+
+                    g_loss = tf.losses.hinge_loss(labels=cumulative_real_y, logits=gen_out, weights=cumulative_real_y/.9)
                     
-                    g_loss = tf.losses.softmax_cross_entropy(cumulative_real_y, gen_out)
+                    
                     g_acc = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(cumulative_real_y, gen_out))
 
                 
@@ -721,7 +729,7 @@ for epoch in range(start_epoch,EPOCHS+1):
                 #tf.contrib.summary.scalar("d_loss_fake", d_loss_fake)
                 tf.contrib.summary.scalar("d_accuracy_fake", d_acc_fake/batch_size)
                 tf.contrib.summary.scalar("g_loss", g_loss)
-                tf.contrib.summary.scalar("g_accuracy", g_acc/batch_size)
+                tf.contrib.summary.scalar("g_accuracy", g_acc/len(cumulative_real_y.numpy()))
                 #tf.contrib.summary.histogram("g_grads?", gradients_of_generator[0]) 
         
         writer.flush()
@@ -730,18 +738,18 @@ for epoch in range(start_epoch,EPOCHS+1):
         print("d_loss: {:.7f}".format(d_loss)) 
         print("real acc: {:.3f}".format(d_acc_real/batch_size))
         if real2_msg != None: print(real2_msg)
-        print("fake acc: acc: {:.3f}".format(d_acc_fake/batch_size))
+        print("fake acc: acc: {:.3f}".format(d_acc_fake/(len(part_fake_y))))
         #print("final d_loss: {}, regularizer delta: {}".format((d_loss), disc_reg))
-        print("g_loss: {:.7f}, acc: {:.3f}".format((g_loss), g_acc/batch_size))
+        print("g_loss: {:.7f}, acc: {:.3f}".format((g_loss), g_acc/len(cumulative_real_y.numpy())))
         #print("mean d grads: {:.8f}, mean g grads: {:.8f}".format(tf.reduce_mean(gradients_of_generator), tf.reduce_mean(gradients_of_discriminator)))
         print("batch time: {:.3f}, total_time: {:.3f}, mean time: {:.3f}\n".format(end-start, total_time, total_time / batches_timed))
         
         global_step.assign_add(1)
         
         
-    if epoch > 150:
-        d_learning_rate.assign(d_learning_base_rate * (0.997 ** (epoch-150)))
-        g_learning_rate.assign(g_learning_base_rate * (0.997 ** (epoch-150)))
+    if epoch > 300:
+        d_learning_rate.assign(d_learning_base_rate * (0.997 ** (epoch-300)))
+        g_learning_rate.assign(g_learning_base_rate * (0.997 ** (epoch-300)))
         print("d_learning_rate = {}, g_learning_rate = {}".format(d_learning_rate.numpy(), g_learning_rate.numpy()))
 
     #gaussian_rate.assign(base_gaussian_noise * (0.997 ** epoch))
