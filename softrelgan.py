@@ -44,7 +44,7 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 32,
+tf.app.flags.DEFINE_integer('batch_size', 16,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
@@ -85,10 +85,9 @@ writer = tf.contrib.summary.create_file_writer(save_path)
 #keras.backend.set_floatx('float16')
     
 EPOCHS = 1000
-d_learning_base_rate = 0.0002
-g_learning_base_rate = 0.0002
+d_learning_base_rate = 0.0005
+g_learning_base_rate = 0.001
 weight_decay = 1e-5
-#base_gaussian_noise = .1
 
 #METRICS=[keras.metrics.categorical_accuracy]
 
@@ -97,6 +96,8 @@ INIT=tf.initializers.glorot_normal(dtype = dtype)
 PRELUINIT=keras.initializers.Constant(value=0.2)
 #g_batchnorm_constraint = MinMaxNorm(min_value=-1.0, max_value=1.0, rate=1.0, axis=[0])
 g_batchnorm_constraint = None
+
+K_REG=tf.keras.regularizers.l2(weight_decay)
 
 GEN_WEIGHTS="gen-weights-{}.hdf5"
 DISCRIM_WEIGHTS="discrim-weights-{}.hdf5"
@@ -247,21 +248,21 @@ def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same'
     # feature detection
     dtensor = Conv2D(depth, 3, strides=1,\
                               padding='same',\
-                              kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(dtensor)
+                              kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
     dtensor = LeakyReLU(0.2)(dtensor)
     dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
     
     # strided higher level feature detection
     dtensor = Conv2D(depth, 3, strides=stride,\
                               padding=stridedPadding,\
-                              kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(dtensor)
+                              kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
     dtensor = LeakyReLU(0.2)(dtensor)
     dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
     if maxpool:
         dtensor = MaxPool2D(padding='same')(dtensor)
         
     # nonsense?
-    #dtensor = Conv2D(depth, 1, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(dtensor)
+    #dtensor = Conv2D(depth, 1, kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
     #dtensor = LeakyReLU(0.2)(dtensor)
     #dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)    
     return dtensor
@@ -272,7 +273,7 @@ def res_d_block(dtensor, depth, stride = 1, stridedPadding='same'):
     if stride > 1:
         dtensor = Conv2D(depth, 3, strides=stride,\
                                   padding=stridedPadding,\
-                                  kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(dtensor)
+                                  kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(dtensor)
         dtensor = LeakyReLU(0.2)(dtensor)
         dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
 
@@ -280,13 +281,13 @@ def res_d_block(dtensor, depth, stride = 1, stridedPadding='same'):
     
     dtensor = Conv2D(depth, 3, strides=1,\
                               padding='same',\
-                              kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(dtensor)
+                              kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(dtensor)
     dtensor = LeakyReLU(0.2)(dtensor)
     dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
 
     dtensor = Conv2D(depth, 3, strides=1,\
                               padding='same',\
-                              kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(dtensor)
+                              kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(dtensor)
     dtensor = LeakyReLU(0.2)(dtensor)
     dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
 
@@ -296,16 +297,16 @@ def res_d_block(dtensor, depth, stride = 1, stridedPadding='same'):
     short = LeakyReLU(0.2)(short)  
     short = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(short)    
     
-    #short = SeparableConv2D(depth, 1, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(short)  # no second-order gradients implemented for this
+    #short = SeparableConv2D(depth, 1, use_bias=False, kernel_regularizer=K_REG)(short)  # no second-order gradients implemented for this
     #short = PReLU()(short)
     #short = LeakyReLU(0.2)(short)  
     #short = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(short)    
     
     short = Conv2D(depth, 1, strides=1,\
                   padding='same',\
-                  kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(short)
+                  kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(short)
     
-    #short = SeparableConv2D(depth, 1, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(short)
+    #short = SeparableConv2D(depth, 1, use_bias=False, kernel_regularizer=K_REG)(short)
     short = LeakyReLU(0.2)(short)
     short = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(short)        
         
@@ -324,11 +325,11 @@ def Discriminator():
     
     d = GaussianNoise(.05)(d)
         
-    d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), strides=1, use_bias=False)(d) # 64x64
+    d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, strides=1, use_bias=False)(d) # 64x64
     BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
     LeakyReLU(0.2)(d)          
 
-    d = Conv2D(64, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), strides=2, use_bias=False)(d) # 32x32
+    d = Conv2D(64, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, strides=2, use_bias=False)(d) # 32x32
     BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
     LeakyReLU(0.2)(d)          
     
@@ -358,7 +359,7 @@ def Discriminator():
     
     #d = Concatenate()([d, a])
     
-    d = Dense(512, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(d)
+    d = Dense(512, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d)
     d = LeakyReLU(0.2)(d)
     d = BatchNormalization(renorm=RENORM, )(d)
     d = Dropout(dense_dropout)(d)
@@ -366,13 +367,13 @@ def Discriminator():
     e = d
     
     # classify ??    
-    d = Dense(num_classes, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(d) # classifier
+    d = Dense(num_classes, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d) # classifier
     #d = Softmax()(d) # calculated in softmax_cross_entropy() but not in hinge_loss()?
     
 
-    e = Dense(32, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(e)
+    e = Dense(32, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e)
     e = LeakyReLU(0.2)(e)
-    e = Dense(1, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(e) # realness
+    e = Dense(1, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e) # realness
     
     discrim = Model(inputs=inp, outputs=[d,e]) # class, realness    
 
@@ -450,23 +451,23 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=False, deconvolve=True
         conv = UpSampling2D(dtype=dtype)(conv)
     
     if deconvolve:
-        conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False, dtype=dtype)(conv)
+        conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
         conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)     
         #conv = ELU()(conv)
         conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
         
-    #conv = SeparableConv2D(depth, size, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), dtype=dtype)(conv)
+    #conv = SeparableConv2D(depth, size, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, dtype=dtype)(conv)
     #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)  
     #conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
     
 
-    #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(conv)
-    conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False, dtype=dtype)(conv)
+    #conv = SeparableConv2D(depth, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG)(conv)
+    conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
     conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
     #conv = ELU()(conv)
     conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
 
-    #conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(conv)
+    #conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG)(conv)
     #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)  
     #conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)            
     
@@ -477,24 +478,25 @@ NOISE = 100
 def Generator():
     xz = Input((num_classes+NOISE,), dtype=dtype)    
     
+    
     #zc = Reshape(target_shape=(-1, 1, 1))(xz)
     #zc = UpSampling2D()(zc) # 2x2
     #zc = UpSampling2D()(zc) # 4x4
     #zc = UpSampling2D()(zc) # 8x8
 
-    #g = Dense(512, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(g)
+    #g = Dense(512, kernel_initializer=INIT, kernel_regularizer=K_REG)(g)
     #g = PReLU(alpha_initializer=PRELUINIT)(g)
     #g = BatchNormalization(renorm=RENORM, )(g)
 
-    g = Dense(512, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False, dtype=dtype)(xz)
+    g = Dense(512, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(xz)
     g = PReLU(alpha_initializer=PRELUINIT)(g)
     g = BatchNormalization(renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
 
-    g = Dense(4*4*256, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False, dtype=dtype)(g)
+    g = Dense(4*4*512, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
     g = PReLU(alpha_initializer=PRELUINIT)(g)
     g = BatchNormalization(renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
 
-    #q = Dense(64*64*3, kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), dtype=dtype, activation='tanh')(g)
+    #q = Dense(64*64*3, kernel_initializer=INIT, kernel_regularizer=K_REG, dtype=dtype, activation='tanh')(g)
     #q = Reshape(channels_shape)(q)
     
     #g = Reshape(target_shape=(2,2,1024))(g)
@@ -504,51 +506,50 @@ def Generator():
     #print("2x2 shape? ", g.shape)
     #g = g_block(g, 256, 2) # 4x4
     
-    g = g_block(g, 256, 2, size=3) # 8x8
-    g = g_block(g, 256, 1, size=3, upsample=False, deconvolve=False)    
+    g = g_block(g, 512, 2, size=3) # 8x8
+    g = g_block(g, 512, 1, size=3, upsample=False, deconvolve=False)    
 
 
     #zc = UpSampling2D()(zc) # 16x16
     
-    g = g_block(g, 128, 2, size=3) # 16x16
+    g = g_block(g, 256, 2, size=3) # 16x16
 
     #g = Concatenate(axis=1)([g,zc])
 
-    g = g_block(g, 128, 1, size=3, upsample=False, deconvolve=False)    
-    g = g_block(g, 128, 1, size=3, upsample=False, deconvolve=False)    
+    g = g_block(g, 256, 1, size=3, upsample=False, deconvolve=False)    
+    g = g_block(g, 256, 1, size=3, upsample=False, deconvolve=False)    
     
     #zc = UpSampling2D()(zc) # 32x32
     
-    g = g_block(g, 64, 2, size=3)  # 32x32
+    g = g_block(g, 128, 2, size=3)  # 32x32
     
     #g = Concatenate()([g,zc])
     
-    g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False)    
+    g = g_block(g, 128, 1, size=3, upsample=False, deconvolve=False)    
     
-    g = g_block(g, 32, 2, size=3) # 64x64
+    g = g_block(g, 64, 2, size=3) # 64x64
 
     # I don't know what these are supposed to do but whatever:
-    g = g_block(g, 32, 1, size=3, upsample=False, deconvolve=False)
+    g = g_block(g, 64, 1, size=3, upsample=False, deconvolve=False)
 
 
-    g = Conv2D(32, 3, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay), use_bias=False)(g)    
-    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(g)
+    g = Conv2D(64, 3, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(g)    
+    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG)(g)
     g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)
     g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(g)
 
-    #g = Conv2D(256, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(g)    
-    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(g)    
-    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(g)
+    #g = Conv2D(256, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG)(g)    
+    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG)(g)    
+    #g = SeparableConv2D(256, 3, depth_multiplier=2, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG)(g)
     #g = LeakyReLU(0.1)(g)
     #g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(g)    
         
-    #g = Conv2D(128, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=tf.keras.regularizers.l2(weight_decay))(g)
+    #g = Conv2D(128, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG)(g)
     #g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)
     #g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(g)
     
     #print(g.shape)
-    g = Conv2D(3, 1, activation='tanh', padding='same', use_bias=False)(g)
-    g = LeakyReLU(alpha=1.0)(g)
+    g = Conv2D(3, 1, activation='tanh', padding='same', use_bias=False)(g)    
     g = Reshape(channels_shape)(g) 
     
     gen = Model(inputs=xz, outputs=g)
@@ -732,8 +733,8 @@ for epoch in range(start_epoch,EPOCHS+1):
 
                 d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - df_realness)
                 
-                #d_l2 = tf.add_n(discrim.losses)
-                #d_loss += d_l2 * .1
+                d_l2 = tf.add_n(discrim.losses)
+                #d_loss += d_l2 * .01
 
             
             gradients_of_discriminator = dtape.gradient(d_loss, discrim.variables)
@@ -763,12 +764,14 @@ for epoch in range(start_epoch,EPOCHS+1):
             #g_loss += tf.losses.sigmoid_cross_entropy(multi_class_labels = all_real_b, logits = df_realness)
             #g_loss += tf.losses.sigmoid_cross_entropy(multi_class_labels = all_real, logits = g_realness)
             
+            g_loss_nonrel = tf.losses.sigmoid_cross_entropy(multi_class_labels=tf.ones_like(df_realness), logits=df_realness)
+            
             #gloss = 0
             
             #g_loss /= 2
             
-            #g_l2 = tf.add_n(gen.losses)
-            #g_loss += g_l2 * .1
+            g_l2 = tf.add_n(gen.losses)
+            #g_loss += g_l2 * .01
             
         #g_acc = tf.keras.metrics.mean_squared_error(all_real, tf.nn.sigmoid(tf.reshape(g_realness, (-1,))))
 
@@ -799,10 +802,10 @@ for epoch in range(start_epoch,EPOCHS+1):
         print("epoch {}; batch {} / {}".format(epoch, batch_num, batches))
         print("dx_realness... {}".format(dx_realness))
         #print("d_loss: {:.7f}, d_l2: {:.7f}".format(d_loss, d_l2)) 
-        print("d_loss_real: {:.7f}, d_loss_fake: {:.7f}, d_l2: {:.7f}".format(d_loss_real, d_loss_fake, -1)) 
+        print("d_loss_real: {:.7f}, d_loss_fake: {:.7f}, combined: {:.7}, d_l2: {:.7f}".format(d_loss_real, d_loss_fake, d_loss, d_l2))
         #print("d_realness MSE: {:.3f}, d_class MSE: {:.3f}".format(d_acc_realness, d_acc_class))
         #print("g_loss: {:.7f}, acc: {:.3f}".format((g_loss), g_acc/batch_size))
-        print("g_loss: {:.7f}, g_l2: {:.7f}".format(g_loss, -1))
+        print("g_loss: {:.7f}, g_loss_nonrel {:.7f}, g_l2: {:.7f}".format(g_loss, g_loss_nonrel, g_l2))
         #print("mean d grads: {:.8f}, mean g grads: {:.8f}".format(tf.reduce_mean(gradients_of_generator), tf.reduce_mean(gradients_of_discriminator)))
         print("batch time: {:.3f}, total_time: {:.3f}, mean time: {:.3f}\n".format(end-start, total_time, total_time / batches_timed))
         
