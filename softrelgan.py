@@ -44,7 +44,7 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 16,
+tf.app.flags.DEFINE_integer('batch_size', 24,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
@@ -84,8 +84,8 @@ writer = tf.contrib.summary.create_file_writer(save_path)
         
 #keras.backend.set_floatx('float16')
     
-EPOCHS = 1000
-d_learning_base_rate = 0.0005
+EPOCHS = 2000
+d_learning_base_rate = 0.0009
 g_learning_base_rate = 0.001
 weight_decay = 1e-5
 
@@ -93,6 +93,7 @@ weight_decay = 1e-5
 
 #INIT=tf.initializers.orthogonal(dtype = dtype)
 INIT=tf.initializers.glorot_normal(dtype = dtype)
+#INIT=tf.initializers.lecun_normal()
 PRELUINIT=keras.initializers.Constant(value=0.2)
 #g_batchnorm_constraint = MinMaxNorm(min_value=-1.0, max_value=1.0, rate=1.0, axis=[0])
 g_batchnorm_constraint = None
@@ -139,14 +140,17 @@ elif FLAGS.disc == 'None':
 ### D A T A S E T
 ###
 
-def rangeshift(inp):
-    inp = (inp * -1) + 127
-    #print(inp)
+input_noise_scale = 0.1
+
+def prepro(inp):
+    inp += np.random.normal(scale = input_noise_scale * 127., size=inp.shape)
+    inp = inp - 127.
+    inp = np.clip(inp, -127., 127.)
     return inp
 
-with tf.device('/cpu:0'):    
+with tf.device('/cpu:0'): 
     ImageDatagen = ImageDataGenerator(
-            rescale=1./255,
+            rescale=1./128,
             width_shift_range=0,
             height_shift_range=0,
             zoom_range=0,
@@ -154,6 +158,7 @@ with tf.device('/cpu:0'):
             cval=255,
             horizontal_flip=False,
             data_format='channels_first',
+            preprocessing_function=prepro,
             dtype=dtype)
 
     train_gen = ImageDatagen.flow_from_directory(
@@ -165,7 +170,7 @@ with tf.device('/cpu:0'):
 
     num_classes = train_gen.num_classes
 
-    flowQueue = queue.Queue(25)
+    flowQueue = queue.Queue(10)
 
     class LoadThread(threading.Thread):
         def __init__(self, q, datagen):
@@ -193,20 +198,13 @@ with tf.device('/cpu:0'):
     def img_float_to_uint8(img, do_reshape=True):
         out = img
         if do_reshape: out = out.reshape(channels_shape)
-        out = np.uint8(out * 255)
+        out = np.uint8(out * 128)
         return out
         
     def img_uint8_to_float(img):
         img = dtype(img)
-        img *= 1./255
+        img *= 1./512
         return img
-
-    def img_quantize(img): # img is a Tensor 
-        g = img
-        g = tf.math.multiply(tf.constant(255.), g)
-        #g = tf.math.floor(g) # quantize
-        g = tf.math.multiply(tf.constant(1./255), g)            
-        return g
 
     # save a grid of images to a file
     def render(all_out, filenum=0):            
@@ -218,6 +216,9 @@ with tf.device('/cpu:0'):
 
         for i in range(min(swatches * swatches, len(all_out))):
             out = all_out[i]
+            out = out + 1.0
+            #out = tf.clip_by_value(out, 0., 2.).numpy()
+            out = np.clip(out, 0., 2.)
             out = img_float_to_uint8(out)
             #print("pre-move shape ", out.shape)
             out = np.moveaxis(out, 0, -1) # switch from channels_first to channels_last
@@ -238,26 +239,27 @@ with tf.device('/cpu:0'):
 
 #test rendering and loading
 render(next_batch()[0], -99999)
+print("sample render done")
     
 ###
 ### D I S C R I M I N A T O R
 ###
 
-def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same'):
+def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same', size=3):
 
     # feature detection
-    dtensor = Conv2D(depth, 3, strides=1,\
-                              padding='same',\
+    dtensor = Conv2D(depth, size, strides=1,\
+                              padding='same', use_bias=False,\
                               kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
     dtensor = LeakyReLU(0.2)(dtensor)
-    dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
+    #dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
     
     # strided higher level feature detection
-    dtensor = Conv2D(depth, 3, strides=stride,\
-                              padding=stridedPadding,\
+    dtensor = Conv2D(depth, size, strides=stride,\
+                              padding=stridedPadding, use_bias=False,\
                               kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
     dtensor = LeakyReLU(0.2)(dtensor)
-    dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
+    #dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
     if maxpool:
         dtensor = MaxPool2D(padding='same')(dtensor)
         
@@ -292,10 +294,8 @@ def res_d_block(dtensor, depth, stride = 1, stridedPadding='same'):
     dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
 
     # diagram at https://towardsdatascience.com/an-overview-of-resnet-and-its-variants-5281e2f56035 ... seems weird but who am I to argue
-    #if stride == 2:
-    #    short = MaxPooling2D()(short)
-    short = LeakyReLU(0.2)(short)  
-    short = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(short)    
+    #short = LeakyReLU(0.2)(short)  
+    #short = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(short)    
     
     #short = SeparableConv2D(depth, 1, use_bias=False, kernel_regularizer=K_REG)(short)  # no second-order gradients implemented for this
     #short = PReLU()(short)
@@ -321,48 +321,36 @@ def Discriminator():
     inp = Input(channels_shape)    
     
     d = inp
-    #d = LeakyReLU(0.2)(inp) # clip negative input values from generator, as they're also clipped in image sampling
-    
-    d = GaussianNoise(.05)(d)
         
-    d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, strides=1, use_bias=False)(d) # 64x64
-    BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
-    LeakyReLU(0.2)(d)          
+    d = Conv2D(32, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, strides=1, use_bias=False)(d) # 64x64
+    d = LeakyReLU(0.2)(d)          
+    d = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
 
-    d = Conv2D(64, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, strides=2, use_bias=False)(d) # 32x32
-    BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
-    LeakyReLU(0.2)(d)          
+    d_block(d, 64, 2) # 32x32
     
     d = d_block(d, 128, 2) # 16x16
-    #d = res_d_block(d, 64, 1)     
-    #d = res_d_block(d, 64, 1)     
-    #d = res_d_block(d, 64, 1)     
     
     d = d_block(d, 256, 2) # 8x8
-    d = res_d_block(d, 256, 1) #     
-    #d = res_d_block(d, 128, 1) #     
-    #d = res_d_block(d, 128, 1) #     
-    d = d_block(d, 512, 2) # 4x4
-    d = res_d_block(d, 512, 1) #     
-    #d = res_d_block(d, 256, 1) #     
-    #d = res_d_block(d, 256, 1) #     
-    #d = d_block(d, 512, 2) # 2x2
-    d = res_d_block(d, 512, 1) # 
-    #d = res_d_block(d, 256, 1) # 
-    #d = res_d_block(d, 256, 1) # 
-    
-    #a = MaxPooling2D()(d)
+
+    #a = AveragePooling2D()(d)
     #a = AveragePooling2D()(a)
     #a = Flatten()(a)
-    
+
+    d = d_block(d, 1024, 2) # 2x2
+        
     d = Flatten()(d)
     
     #d = Concatenate()([d, a])
+
+    d = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
+
+    d = Dropout(dense_dropout)(d)
     
     d = Dense(512, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d)
     d = LeakyReLU(0.2)(d)
     d = BatchNormalization(renorm=RENORM, )(d)
     d = Dropout(dense_dropout)(d)
+
 
     e = d
     
@@ -454,7 +442,7 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=False, deconvolve=True
         conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
         conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)     
         #conv = ELU()(conv)
-        conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
+        #conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
         
     #conv = SeparableConv2D(depth, size, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, dtype=dtype)(conv)
     #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)  
@@ -597,7 +585,7 @@ def sample(filenum=0):
         inp = gen_input_batch([keras.utils.to_categorical(classes[x] % num_classes, num_classes=num_classes) for x in range(_classidx,_classidx+10)], clipping=0.25*(i+1))
         _classidx += 10
         print(inp.shape)
-        batch_out = tf.nn.relu(gen(inp, training=True)).numpy()
+        batch_out = gen.predict(inp)
         print(batch_out.shape)
         for out in batch_out:
             all_out.append(out)
@@ -673,6 +661,7 @@ apply_discrim_gradients = tf.contrib.eager.defun(apply_discrim_gradients)
   
 for epoch in range(start_epoch,EPOCHS+1):
     print("--- epoch %d ---" % (epoch,))
+    input_noise_scale = 0.1 * (0.995 ** epoch) # effect of this is delayed due to queue but oh well
     for batch_num in range(batches):
         start = timer()
         
@@ -744,7 +733,7 @@ for epoch in range(start_epoch,EPOCHS+1):
             #disc_reg = (gamma/2.0)*disc_reg
             #d_loss += disc_reg
 
-            df_realness = tf.concat([df_realness[8:], df_realness[:8]], axis=0)
+            #df_realness = tf.concat([df_realness[8:], df_realness[:8]], axis=0)
             
             #gen_out_a = out[len(real_y):]
         
@@ -791,10 +780,12 @@ for epoch in range(start_epoch,EPOCHS+1):
         #d_loss_fake = tf.reduce_mean(d_loss_fake)
         with writer.as_default():
             with tf.contrib.summary.always_record_summaries():
-                tf.contrib.summary.scalar("d_loss", d_loss)
-                tf.contrib.summary.scalar("g_loss", g_loss)
+                tf.contrib.summary.scalar("d_loss_real", d_loss)
+                tf.contrib.summary.scalar("d_loss_fake", d_loss)
+                tf.contrib.summary.scalar("g_loss", g_loss)                
                 #tf.contrib.summary.scalar("d_acc_realness", d_acc_realness)
                 #tf.contrib.summary.scalar("g_accuracy", g_acc)
+                tf.contrib.summary.histogram("d_grads?", gradients_of_discriminator[0])
                 #tf.contrib.summary.histogram("g_grads?", gradients_of_generator[0]) 
         
         writer.flush()
@@ -810,6 +801,10 @@ for epoch in range(start_epoch,EPOCHS+1):
         print("batch time: {:.3f}, total_time: {:.3f}, mean time: {:.3f}\n".format(end-start, total_time, total_time / batches_timed))
         
         global_step.assign_add(1)
+
+    with writer.as_default():
+        with tf.contrib.summary.always_record_summaries():
+            for w in discrim.weights: tf.contrib.summary.histogram(w.name, w)
         
         
     if epoch > 300:
