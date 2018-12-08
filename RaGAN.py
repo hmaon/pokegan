@@ -374,13 +374,11 @@ def Discriminator():
     e = d
     
     # classify ??    
-    d = Dense(num_classes, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d) # classifier
-    #d = Softmax()(d) # calculated in softmax_cross_entropy() but not in hinge_loss()?
-    
+    d = Dense(num_classes, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d) # classifier    
 
     e = Dense(128, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e)
     e = LeakyReLU(0.2)(e)
-    e = BatchNormalization(renorm=RENORM, )(e)
+    #e = BatchNormalization(renorm=RENORM, )(e)
     e = Dense(1, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e) # realness
     
     discrim = Model(inputs=inp, outputs=[d,e]) # class, realness    
