@@ -306,25 +306,25 @@ def dense_d_block(dtensor, depth = 128, stride=1, stridedPadding='same', size=3,
 
     maps = []
 
+    dt2 = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)            
+    dt2 = LeakyReLU(0.2)(dt2)
+
     # strided higher level feature detection
     dtensor = Conv2D(depth, size, strides=stride,\
                               padding=stridedPadding, use_bias=False,\
                               kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
-    maps.append(dtensor)
     
     for i in range(extra):
-        if len(maps) > 1: 
-            dtensor = Concatenate(axis=1)(maps)
-        dtensor = Conv2D(depth, size, strides=1,\
+        dt2 = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)            
+        dt2 = LeakyReLU(0.2)(dt2)
+        
+        dt2 = Conv2D(depth, size, strides=1,\
                                   padding=stridedPadding, use_bias=False,\
-                                  kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
-        dtensor = LeakyReLU(0.2)(dtensor)
-        dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
-        maps.append(dtensor)
+                                  kernel_initializer=INIT, kernel_regularizer=K_REG)(dt2)
+
+        dtensor = Concatenate(axis=1)([dtensor, dt2])            
         
     dtensor = Concatenate(axis=1)(maps)        
-    dtensor = LeakyReLU(0.2)(dtensor)
-    dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
     return dtensor
 
     
@@ -380,6 +380,7 @@ def Discriminator():
 
     e = Dense(128, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e)
     e = LeakyReLU(0.2)(e)
+    e = BatchNormalization(renorm=RENORM, )(e)
     e = Dense(1, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e) # realness
     
     discrim = Model(inputs=inp, outputs=[d,e]) # class, realness    
@@ -453,15 +454,13 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
 ###
 
 # semi-dense generator block...
-def g_block(gtensor, depth=32, stride=1, size=3, upsample=False, deconvolve=True, extra=2):
+def g_block(gtensor, depth=32, stride=1, size=3, upsample=False, deconvolve=True, extra=3):
     conv = gtensor
     if upsample: 
         conv = UpSampling2D(dtype=dtype)(conv)
     
     if deconvolve:
         conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
-        conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)     
-        conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
             
     if extra > 0:
         # maps = [conv] # closer to true DenseNet architecture
@@ -470,9 +469,11 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=False, deconvolve=True
         for i in range(extra):
             if len(maps) > 1:         
                 conv = Concatenate(axis=1)(maps)
-            conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
+
             conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
             conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+                
+            conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
             maps.append(conv)
 
         conv = Concatenate(axis=1)(maps)
@@ -528,13 +529,13 @@ def Generator():
     
     #g = Concatenate(axis=1)([g, q])
     
-    g = g_block(g, 128, 2)  # 32x32
+    g = g_block(g, 64, 2)  # 32x32
     
     
     #g = Concatenate()([g,zc])
     
     
-    g = g_block(g, 64, 2, extra=3) # 64x64
+    g = g_block(g, 32, 2) # 64x64
 
     #g = Conv2D(64, 3, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
     #g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)    
