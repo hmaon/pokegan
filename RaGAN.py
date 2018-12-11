@@ -44,7 +44,7 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 12,
+tf.app.flags.DEFINE_integer('batch_size', 56,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
@@ -85,8 +85,8 @@ writer = tf.contrib.summary.create_file_writer(save_path)
 #keras.backend.set_floatx('float16')
     
 EPOCHS = 5000
-d_learning_base_rate = 0.001
-g_learning_base_rate = 0.001
+d_learning_base_rate = 0.0005
+g_learning_base_rate = 0.0005
 weight_decay = 1e-5
 
 #METRICS=[keras.metrics.categorical_accuracy]
@@ -152,12 +152,12 @@ def prepro(inp):
 with tf.device('/cpu:0'): 
     ImageDatagen = ImageDataGenerator(
             rescale=1./127,
-            width_shift_range=8,
-            height_shift_range=8,
-            zoom_range=.02,
-            fill_mode='wrap',
+            width_shift_range=0,
+            height_shift_range=0,
+            zoom_range=0.,
+            fill_mode='reflect',
             cval=255,
-            horizontal_flip=False,
+            horizontal_flip=True,
             data_format='channels_first',
             preprocessing_function=prepro,
             dtype=dtype)
@@ -246,14 +246,14 @@ print("sample render done")
 ### D I S C R I M I N A T O R
 ###
 
-def d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same', size=3):
+def simple_d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same', size=5):
 
     # feature detection
-    dtensor = Conv2D(depth, size, strides=1,\
-                              padding='same', use_bias=False,\
-                              kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
-    dtensor = LeakyReLU(0.2)(dtensor)
-    dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
+    #dtensor = Conv2D(depth, size, strides=1,\
+    #                          padding='same', use_bias=False,\
+    #                          kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
+    #dtensor = LeakyReLU(0.2)(dtensor)
+    #dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
     
     # strided higher level feature detection
     dtensor = Conv2D(depth, size, strides=stride,\
@@ -304,8 +304,6 @@ def res_d_block(dtensor, depth, stride = 1, stridedPadding='same', extra=3):
 # semi-DenseNet-like block    
 def dense_d_block(dtensor, depth = 128, stride=1, stridedPadding='same', size=3, extra=4):
 
-    maps = []
-
     dt2 = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)            
     dt2 = LeakyReLU(0.2)(dt2)
 
@@ -324,7 +322,6 @@ def dense_d_block(dtensor, depth = 128, stride=1, stridedPadding='same', size=3,
 
         dtensor = Concatenate(axis=1)([dtensor, dt2])            
         
-    dtensor = Concatenate(axis=1)(maps)        
     return dtensor
 
     
@@ -332,53 +329,46 @@ def dense_d_block(dtensor, depth = 128, stride=1, stridedPadding='same', size=3,
 #gaussian_rate = tfe.Variable(d_learning_base_rate)    # can't include in Discriminator() because .save() crashes on it :( :( :( wtf :(
 
 def Discriminator():
-    dense_dropout = 0.25
+    dense_dropout = 0.1
     
     inp = Input(channels_shape)    
     
     d = inp
         
     d = Conv2D(64, 7, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, strides=1, use_bias=False)(d) # 64x64
-    d = LeakyReLU(0.2)(d)          
     d = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
+    d = LeakyReLU(0.2)(d)          
     
-    d = res_d_block(d, 64, 2) # 32x32
-    d = res_d_block(d, 64, 1) # 32x32
-    d = res_d_block(d, 64, 1) # 32x32
+    d = simple_d_block(d, 64, 2) # 32x32
 
-    d = res_d_block(d, 128, 2) # 16x16
-    d = res_d_block(d, 128, 1) # 16x16
-    d = res_d_block(d, 128, 1) # 16x16
+    d = simple_d_block(d, 128, 2) # 16x16
     
-    d = res_d_block(d, 256, 2) # 8x8
-    d = res_d_block(d, 256, 1) # 8x8
-    d = res_d_block(d, 256, 1) # 8x8
+    d = simple_d_block(d, 256, 2) # 8x8
 
-    d = res_d_block(d, 256, 2, extra=3) # 4x4        
-    d = res_d_block(d, 256, 1, extra=3) # 4x4        
-    d = res_d_block(d, 256, 1, extra=3) # 4x4        
+    d = simple_d_block(d, 512, 2) # 4x4        
     
-    d = res_d_block(d, 256, 2) # 2x2
-    d = res_d_block(d, 256, 1) # 2x2
-    d = res_d_block(d, 256, 1) # 2x2
+    d = simple_d_block(d, 1024, 2) # 2x2
+
+    #d = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
+    #d = LeakyReLU(0.2)(d)
 
     d = Flatten()(d)
     
     #d = Concatenate()([d, a])
     
-    d = Dense(1024, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d)
-    d = LeakyReLU(0.2)(d)
+    d = Dense(2048, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d)
     d = Dropout(dense_dropout)(d)
     d = BatchNormalization(renorm=RENORM, )(d)
+    d = LeakyReLU(0.2)(d)
 
     e = d
     
     # classify ??    
     d = Dense(num_classes, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d) # classifier    
 
-    e = Dense(128, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e)
-    e = LeakyReLU(0.2)(e)
+    #e = Dense(128, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e)
     #e = BatchNormalization(renorm=RENORM, )(e)
+    #e = LeakyReLU(0.2)(e)
     e = Dense(1, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(e) # realness
     
     discrim = Model(inputs=inp, outputs=[d,e]) # class, realness    
@@ -452,7 +442,8 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
 ###
 
 # semi-dense generator block...
-def g_block(gtensor, depth=32, stride=1, size=3, upsample=False, deconvolve=True, extra=3):
+def dense_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvolve=True, extra=2):
+    assert extra > 0
     conv = gtensor
     if upsample: 
         conv = UpSampling2D(dtype=dtype)(conv)
@@ -461,22 +452,41 @@ def g_block(gtensor, depth=32, stride=1, size=3, upsample=False, deconvolve=True
         conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
             
     if extra > 0:
-        # maps = [conv] # closer to true DenseNet architecture
-        maps = [] # lighter-weight version forcing all deconv output through conv2ds
+        maps = [conv] # closer to true DenseNet architecture
+        #maps = [] # lighter-weight version forcing all deconv output through conv2ds
                       
         for i in range(extra):
             if len(maps) > 1:         
                 conv = Concatenate(axis=1)(maps)
 
-            conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
             conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+            conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
                 
             conv = Conv2D(depth, size, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
             maps.append(conv)
 
         conv = Concatenate(axis=1)(maps)
-        conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
         conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+        conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
+        
+        conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
+        conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+        conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
+            
+    return conv
+
+
+def simple_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvolve=True, extra=2):
+    assert extra > 0
+    conv = gtensor
+    if upsample: 
+        conv = UpSampling2D(dtype=dtype)(conv)
+    
+    if deconvolve:
+        conv = Conv2DTranspose(depth, size, padding='same', strides=stride, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
+
+    conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+    conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
             
     return conv
     
@@ -497,8 +507,8 @@ def Generator():
     #g = BatchNormalization(renorm=RENORM, )(g)
 
     g = Dense(2*2*1024, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
-    g = PReLU(alpha_initializer=PRELUINIT)(g)
     g = BatchNormalization(renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
+    g = PReLU(alpha_initializer=PRELUINIT)(g)
     
     #q = Dense(64*64*3, kernel_initializer=INIT, kernel_regularizer=K_REG, dtype=dtype, activation='tanh')(g)
     #q = Reshape(channels_shape)(q)
@@ -508,13 +518,13 @@ def Generator():
 
     #g = g_block(g, 512, 2)
     #print("2x2 shape? ", g.shape)
-    g = g_block(g, 512, 2) # 4x4
+    g = simple_g_block(g, 512, 2) # 4x4
     
-    g = g_block(g, 256, 2) # 8x8
+    g = simple_g_block(g, 256, 2) # 8x8
 
     #zc = UpSampling2D()(zc) # 16x16
     
-    g = g_block(g, 128, 2) # 16x16
+    g = simple_g_block(g, 128, 2) # 16x16
 
     #g = Concatenate(axis=1)([g,zc])
 
@@ -527,17 +537,14 @@ def Generator():
     
     #g = Concatenate(axis=1)([g, q])
     
-    g = g_block(g, 64, 2)  # 32x32
+    g = simple_g_block(g, 64, 2)  # 32x32
     
     
-    #g = Concatenate()([g,zc])
-    
-    
-    g = g_block(g, 32, 2) # 64x64
+    g = simple_g_block(g, 32, 2) # 64x64
 
-    #g = Conv2D(64, 3, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
-    #g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)    
-    #g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)        
+    g = Conv2D(32, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
+    g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)        
+    g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)    
     
     #print(g.shape)
     g = Conv2D(3, 1, activation='tanh', padding='same', use_bias=False)(g)    
@@ -842,14 +849,14 @@ for epoch in range(start_epoch,EPOCHS+1):
 
     #with writer.as_default():
     #    with tf.contrib.summary.always_record_summaries():
-    #        for w in gen.weights: tf.contrib.summary.histogram(w.name, w)
+    #        for w in discrim.weights: tf.contrib.summary.histogram(w.name, w)
         
         
     if epoch > 200:
         #d_learning_rate.assign(0.0001 + random.random() * 0.0005)
         #g_learning_rate.assign(0.0001 + random.random() * 0.0005)
-        d_learning_rate.assign(d_learning_base_rate * (0.9998 ** (epoch-200)))
-        g_learning_rate.assign(g_learning_base_rate * (0.9998 ** (epoch-200)))
+        d_learning_rate.assign(d_learning_base_rate * (0.9994 ** (epoch-200)))
+        g_learning_rate.assign(g_learning_base_rate * (0.9994 ** (epoch-200)))
         print("d_learning_rate = {}, g_learning_rate = {}".format(d_learning_rate.numpy(), g_learning_rate.numpy()))
 
     #gaussian_rate.assign(base_gaussian_noise * (0.997 ** epoch))
