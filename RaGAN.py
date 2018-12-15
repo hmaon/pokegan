@@ -98,8 +98,8 @@ PRELUINIT=keras.initializers.Constant(value=0.0)
 #g_batchnorm_constraint = MinMaxNorm(min_value=-1.0, max_value=1.0, rate=1.0, axis=[0])
 g_batchnorm_constraint = None
 
-#K_REG=tf.keras.regularizers.l2(weight_decay)
-K_REG=None
+K_REG=tf.keras.regularizers.l2(weight_decay)
+#K_REG=None
 BNSCALE=True
 
 GEN_WEIGHTS="gen-weights-{}.hdf5"
@@ -142,7 +142,13 @@ elif FLAGS.disc == 'None':
 ### D A T A S E T
 ###
 
-input_noise_scale = 0.2 * (0.995 ** start_epoch)
+
+def get_input_noise_scale(epoch):
+    scale = 0.2 * (0.999 ** (epoch + 100)) # effect of this is delayed due to queue but oh well; the constant here (100) is the length of the queue
+    scale = max(scale, 25./256)
+    return scale
+
+input_noise_scale = get_input_noise_scale(start_epoch)
 
 def prepro(inp):
     inp += np.random.normal(scale = input_noise_scale * 127., size=inp.shape)
@@ -158,7 +164,7 @@ with tf.device('/cpu:0'):
             zoom_range=0.,
             fill_mode='reflect',
             cval=255,
-            horizontal_flip=True,
+            horizontal_flip=False,
             data_format='channels_first',
             preprocessing_function=prepro,
             dtype=dtype)
@@ -172,7 +178,7 @@ with tf.device('/cpu:0'):
 
     num_classes = train_gen.num_classes
 
-    flowQueue = queue.Queue(10)
+    flowQueue = queue.Queue(100)
 
     class LoadThread(threading.Thread):
         def __init__(self, q, datagen):
@@ -731,7 +737,7 @@ apply_discrim_gradients = tf.contrib.eager.defun(apply_discrim_gradients)
   
 for epoch in range(start_epoch,EPOCHS+1):
     print("--- epoch %d ---" % (epoch,))
-    input_noise_scale = 0.2 * (0.999 ** (epoch + flowQueue.maxsize)) # effect of this is delayed due to queue but oh well
+    input_noise_scale = get_input_noise_scale(epoch)
     for batch_num in range(batches):
         start = timer()
         
@@ -811,8 +817,8 @@ for epoch in range(start_epoch,EPOCHS+1):
                 #d_loss *= .5
                 d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - dreplay_realness)
             
-            #d_l2 = tf.add_n(discrim.losses)
-            d_l2 = -1
+            d_l2 = tf.add_n(discrim.losses)
+            #d_l2 = -1
             #d_loss += d_l2 * .01
 
             
@@ -847,15 +853,15 @@ for epoch in range(start_epoch,EPOCHS+1):
 
             #g_loss = g_loss_class + g_loss
             
-            #g_l2 = tf.add_n(gen.losses)
-            g_l2 = -1
+            g_l2 = tf.add_n(gen.losses)
+            #g_l2 = -1
             #g_loss += g_l2 * .01
-            
-            # can it!
-            #while tf.greater(d_loss, 2.0) or tf.greater(g_loss, 2.0):
-            #    d_loss *= .5
-            #    g_loss *= .5
-            
+
+            if g_l2 > 1:
+                g_loss += g_l2
+            if d_l2 > .5:
+                d_loss += d_l2
+                
         #g_acc = tf.keras.metrics.mean_squared_error(all_real, tf.nn.sigmoid(tf.reshape(g_realness, (-1,))))
 
         #d_acc_class = tf.reduce_sum(tf.keras.metrics.categorical_accuracy(real_y, tf.nn.softmax(d_class))) / batch_size
