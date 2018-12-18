@@ -44,7 +44,7 @@ from scipy import ndimage
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 64,
+tf.app.flags.DEFINE_integer('batch_size', 48,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
@@ -85,9 +85,9 @@ writer = tf.contrib.summary.create_file_writer(save_path)
 #keras.backend.set_floatx('float16')
     
 EPOCHS = 10000
-d_learning_base_rate = 0.0004
+d_learning_base_rate = 0.0005
 g_learning_base_rate = 0.0005
-weight_decay = 1e-5
+weight_decay = 1e-6
 
 #METRICS=[keras.metrics.categorical_accuracy]
 
@@ -159,10 +159,10 @@ def prepro(inp):
 with tf.device('/cpu:0'): 
     ImageDatagen = ImageDataGenerator(
             rescale=1./127,
-            width_shift_range=5,
-            height_shift_range=5,
+            width_shift_range=15,
+            height_shift_range=15,
             zoom_range=0.,
-            fill_mode='reflect',
+            fill_mode='constant',
             cval=255,
             horizontal_flip=False,
             data_format='channels_first',
@@ -254,7 +254,7 @@ print("sample render done")
 ### D I S C R I M I N A T O R
 ###
 
-def simple_d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same', size=5):
+def simple_d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding='same', size=7):
     
     # strided higher level feature detection
     dtensor = Conv2D(depth, size, strides=stride,\
@@ -357,22 +357,20 @@ def Discriminator():
     inp = Input(channels_shape)    
     
     d = inp
-        
-    d = Conv2D(32, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, strides=1, use_bias=False)(d) # 128x128
-    d = LeakyReLU(alpha=0.2)(d)          
-    d = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(d)
     
-    d = simple_d_block(d, 32, 2) # 64x64
+    d = simple_d_block(d, 32, stride=1) # 128x128
     
-    d = simple_d_block(d, 64, 2) # 32x32
+    #d = simple_d_block(d, 32, 2) # 64x64
+    
+    d = simple_d_block(d, 64, 4) # 32x32
 
-    d = simple_d_block(d, 128, 2) # 16x16
+    #d = simple_d_block(d, 128, 2) # 16x16
     
-    d = simple_d_block(d, 256, 2) # 8x8
+    d = simple_d_block(d, 256, 4) # 8x8
 
-    d = halfpool_d_block(d, 256, 2) # 4x4        
+    #d = simple_d_block(d, 512, 2) # 4x4        
     
-    d = halfpool_d_block(d, 256, 2, size=3) # 2x2
+    d = simple_d_block(d, 1024, 4, size=5) # 2x2
     
     #d = halfpool_d_block(d, 256, 2, size=2) # 1x1
 
@@ -509,7 +507,7 @@ def dense_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvolv
     return conv
 
 
-def simple_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvolve=True, extra=0, padding='same'):
+def simple_g_block(gtensor, depth=32, stride=1, size=7, upsample=False, deconvolve=True, extra=0, padding='same'):
     conv = gtensor
     if upsample: 
         conv = UpSampling2D(dtype=dtype)(conv) # LookupError: gradient registry has no entry for: ResizeNearestNeighborGrad
@@ -544,7 +542,7 @@ def Generator():
     #g = BatchNormalization(renorm=RENORM, scale=BNSCALE, )(g)
 
     
-    g = Dense(512, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)    
+    g = Dense(2048, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)    
     
     g = PReLU(alpha_initializer=PRELUINIT)(g)
     #g = ELU()(g)    
@@ -561,13 +559,13 @@ def Generator():
     g = simple_g_block(g, 512, 2, 2, padding='valid')    
     print("2x2 shape? ", g.shape)
 
-    g = simple_g_block(g, 512, 2) # 4x4
+    #g = simple_g_block(g, 512, 2) # 4x4
     
-    g = simple_g_block(g, 256, 2) # 8x8
+    g = simple_g_block(g, 256, 4) # 8x8
 
     #zc = UpSampling2D()(zc) # 16x16
     
-    g = simple_g_block(g, 128, 2) # 16x16
+    #g = simple_g_block(g, 128, 2) # 16x16
 
     #g = Concatenate(axis=1)([g,zc])
 
@@ -580,14 +578,14 @@ def Generator():
     
     #g = Concatenate(axis=1)([g, q])
     
-    g = simple_g_block(g, 64, 2)  # 32x32
+    g = simple_g_block(g, 64, 4)  # 32x32
     
     
-    g = simple_g_block(g, 32, 2) # 64x64
+    #g = simple_g_block(g, 32, 2) # 64x64
     
-    g = simple_g_block(g, 16, 2) # 128x128
+    g = simple_g_block(g, 32, 4) # 128x128
 
-    g = Conv2D(16, 3, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
+    g = Conv2D(32, 3, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
     #g = PReLU(alpha_initializer=PRELUINIT)(g)
     g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)
     #g = ELU()(g)
@@ -857,9 +855,10 @@ for epoch in range(start_epoch,EPOCHS+1):
             #g_l2 = -1
             #g_loss += g_l2 * .01
 
-            if g_l2 > 1:
+            if g_l2 > .2:
                 g_loss += g_l2
-            if d_l2 > .5:
+        
+            if d_l2 > .05:
                 d_loss += d_l2
                 
         #g_acc = tf.keras.metrics.mean_squared_error(all_real, tf.nn.sigmoid(tf.reshape(g_realness, (-1,))))
