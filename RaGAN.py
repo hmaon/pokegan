@@ -15,7 +15,7 @@ import tensorflow as tf
 tf.enable_eager_execution()
 
 from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import Dense, Activation, Flatten, Reshape, GaussianNoise
+from tensorflow.keras.layers import Dense, Activation, Flatten, Reshape, GaussianNoise, Lambda
 from tensorflow.keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, SeparableConv2D, MaxPool2D, AveragePooling2D, MaxPooling2D
 from tensorflow.keras.layers import LeakyReLU, Dropout, ReLU, PReLU, ELU
 from tensorflow.keras.layers import BatchNormalization
@@ -43,7 +43,7 @@ import PIL
 from scipy import ndimage
 
 def InstanceNorm():
-    return Lambda(partial(tf.contrib.instance_norm, data_format=DATA_FORMAT_NCHW))
+    return Lambda(partial(tf.contrib.layers.instance_norm, data_format='NCHW'))
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -265,7 +265,8 @@ def simple_d_block(dtensor, depth = 128, stride=1, maxpool=False, stridedPadding
                               padding=stridedPadding, use_bias=False,\
                               kernel_initializer=INIT, kernel_regularizer=K_REG)(dtensor)
     dtensor = LeakyReLU(alpha=0.2)(dtensor)
-    dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
+    #dtensor = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, )(dtensor)
+    dtensor = InstanceNorm()(dtensor)
     if maxpool:
         dtensor = MaxPool2D(padding='same')(dtensor)
         
@@ -390,7 +391,8 @@ def Discriminator():
     d = Dense(512, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d)
     d = Dropout(dense_dropout)(d)
     d = LeakyReLU(alpha=0.2)(d)
-    d = BatchNormalization(renorm=RENORM, scale=False)(d)
+    #d = BatchNormalization(renorm=RENORM, scale=False)(d)
+    d = InstanceNorm()(d)
     
     # classify ??    
     d = Dense(num_classes, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False)(d) # classifier    
@@ -523,7 +525,8 @@ def simple_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvol
     #conv = PReLU(alpha_initializer=PRELUINIT)(conv) 
     conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
     #conv = ELU()(conv)
-    conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+    #conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+    conv = InstanceNorm()(conv)
             
     return conv
 
@@ -543,20 +546,21 @@ def Generator():
     g = PReLU(alpha_initializer=PRELUINIT)(g)
 
     g = Reshape(target_shape=(-1,1,1))(g)
-    g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
+    #g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
+    g = InstanceNorm()(g)
     
     g = simple_g_block(g, 512, 2, 2, padding='valid') # 2x2
     print("2x2 shape? ", g.shape)
 
-    g = simple_g_block(g, 512, 4, size=7) # 8x8
-    #g = simple_g_block(g, 512, 2) # 4x4
+    #g = simple_g_block(g, 512, 4, size=7) # 8x8
+    g = simple_g_block(g, 512, 2) # 4x4
     
-    #g = simple_g_block(g, 256, 2) # 8x8
+    g = simple_g_block(g, 256, 2) # 8x8
 
-    g = simple_g_block(g, 128, 4, size=7) # 32x32
-    #g = simple_g_block(g, 128, 2) # 16x16    
+    #g = simple_g_block(g, 128, 4, size=7) # 32x32
+    g = simple_g_block(g, 128, 2) # 16x16    
     
-    #g = simple_g_block(g, 64, 2)  # 32x32
+    g = simple_g_block(g, 64, 2)  # 32x32
         
     g = simple_g_block(g, 64, 2) # 64x64
     
@@ -564,7 +568,8 @@ def Generator():
 
     g = Conv2D(32, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
     g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)
-    g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)        
+    #g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)        
+    g = InstanceNorm()(g)
     
     #print(g.shape)
     g = Conv2D(3, 1, activation='tanh', padding='same', use_bias=True)(g)    
