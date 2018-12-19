@@ -1,8 +1,13 @@
 #!/bin/bash
 
 
-for i in unsanitized/*/*.png
+for i in unsanitized/*/*
 do
-	convert $i -background white -alpha remove -colorspace RGB -filter Lanczos -resize 64x64\>^ -colorspace sRGB -gravity center -extent 64x64 "${i//unsanitized/dir_per_class}"
-	echo $i
+	export o="${i//unsanitized/dir_per_class}"
+	export o="${o//JPEG/png}"
+	export o="${o//JPG/png}"
+	export o="${o//jpeg/png}"
+	export o="${o//jpg/png}"
+	convert $i -auto-orient -alpha remove -colorspace RGB -filter Lanczos -resize 128x128 -colorspace sRGB -background white -gravity center -extent 128x128 -normalize $o
+	echo $o
 done

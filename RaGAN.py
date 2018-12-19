@@ -36,10 +36,14 @@ import tensorflow.contrib.eager as tfe
 import random,math
 import sys,os
 from timeit import default_timer as timer
+from functolls import partial
 
 import PIL
 
 from scipy import ndimage
+
+def InstanceNorm():
+    return Lambda(partial(tf.contrib.instance_norm, data_format=DATA_FORMAT_NCHW))
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -473,7 +477,7 @@ def Discriminator_Regularizer(D1_logits, D1_arg, D2_logits, D2_arg, tape=None):
 ###
 
 # semi-dense generator block...
-def dense_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvolve=True, extra=2):
+def dense_g_block(gtensor, depth=32, stride=1, size=3, upsample=False, deconvolve=True, extra=2):
     assert extra > 0
     conv = gtensor
     if upsample: 
@@ -500,14 +504,14 @@ def dense_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvolv
         conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
         conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
         
-        conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
-        conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
-        conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
+        #conv = Conv2D(depth, 1, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
+        #conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+        #conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(conv)    
             
     return conv
 
 
-def simple_g_block(gtensor, depth=32, stride=1, size=7, upsample=False, deconvolve=True, extra=0, padding='same'):
+def simple_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvolve=True, extra=0, padding='same'):
     conv = gtensor
     if upsample: 
         conv = UpSampling2D(dtype=dtype)(conv) # LookupError: gradient registry has no entry for: ResizeNearestNeighborGrad
@@ -532,63 +536,34 @@ def Generator():
     
     g = xz
     
-    #zc = Reshape(target_shape=(-1, 1, 1))(xz)
-    #zc = UpSampling2D()(zc) # 2x2
-    #zc = UpSampling2D()(zc) # 4x4
-    #zc = UpSampling2D()(zc) # 8x8
-
-    #g = Dense(512, kernel_initializer=INIT, kernel_regularizer=K_REG)(g)
-    #g = PReLU(alpha_initializer=PRELUINIT)(g)
-    #g = BatchNormalization(renorm=RENORM, scale=BNSCALE, )(g)
 
     
     g = Dense(2048, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)    
     
     g = PReLU(alpha_initializer=PRELUINIT)(g)
-    #g = ELU()(g)    
-    #g = BatchNormalization(renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
 
-    
-    #q = Dense(64*64*3, kernel_initializer=INIT, kernel_regularizer=K_REG, dtype=dtype, activation='tanh')(g)
-    #q = Reshape(channels_shape)(q)
-    
-    #g = Reshape(target_shape=(2,2,1024))(g)
     g = Reshape(target_shape=(-1,1,1))(g)
     g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
     
-    g = simple_g_block(g, 512, 2, 2, padding='valid')    
+    g = simple_g_block(g, 512, 2, 2, padding='valid') # 2x2
     print("2x2 shape? ", g.shape)
 
+    g = simple_g_block(g, 512, 4, size=7) # 8x8
     #g = simple_g_block(g, 512, 2) # 4x4
     
-    g = simple_g_block(g, 256, 4) # 8x8
+    #g = simple_g_block(g, 256, 2) # 8x8
 
-    #zc = UpSampling2D()(zc) # 16x16
+    g = simple_g_block(g, 128, 4, size=7) # 32x32
+    #g = simple_g_block(g, 128, 2) # 16x16    
     
-    #g = simple_g_block(g, 128, 2) # 16x16
+    #g = simple_g_block(g, 64, 2)  # 32x32
+        
+    g = simple_g_block(g, 64, 2) # 64x64
+    
+    g = simple_g_block(g, 32, 2) # 128x128
 
-    #g = Concatenate(axis=1)([g,zc])
-
-    #zc = UpSampling2D()(zc) # 32x32
-    
-    #q = Dense(16*16*4, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(xz)
-    #q = PReLU(alpha_initializer=PRELUINIT)(q)
-    #q = BatchNormalization(renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(q)    
-    #q = Reshape((-1, 16, 16))(q)
-    
-    #g = Concatenate(axis=1)([g, q])
-    
-    g = simple_g_block(g, 64, 4)  # 32x32
-    
-    
-    #g = simple_g_block(g, 32, 2) # 64x64
-    
-    g = simple_g_block(g, 32, 4) # 128x128
-
-    g = Conv2D(32, 3, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
-    #g = PReLU(alpha_initializer=PRELUINIT)(g)
+    g = Conv2D(32, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
     g = PReLU(alpha_initializer=PRELUINIT, shared_axes=[2,3])(g)
-    #g = ELU()(g)
     g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)        
     
     #print(g.shape)
@@ -617,9 +592,9 @@ def gen_input(_class=None, clipping=0.95):
     #noise = np.random.uniform(-clipping, clipping, NOISE)
     #noise = np.random.permutation(NOISE) * (1.0 / NOISE) % clipping
     noise = np.random.normal(loc = 0, scale=1, size=NOISE)
-    noise = (noise % clipping) * (np.abs(noise) / noise)
+    noise = (noise % clipping) #* (np.abs(noise) / noise)
     nois2 = np.random.normal(loc = 0, scale=1, size=NOIS2)
-    nois2 = (nois2 % clipping) * (np.abs(nois2) / nois2)
+    nois2 = (nois2 % clipping) #* (np.abs(nois2) / nois2)
     if type(_class) == type(None):
         _class = keras.utils.to_categorical(random.randint(0, num_classes-2), num_classes=num_classes)
     ret = np.multiply(_class.reshape((-1,1)), nois2).flatten()
