@@ -36,7 +36,7 @@ import tensorflow.contrib.eager as tfe
 import random,math
 import sys,os
 from timeit import default_timer as timer
-from functolls import partial
+from functools import partial
 
 import PIL
 
