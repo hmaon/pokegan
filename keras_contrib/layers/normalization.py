@@ -120,7 +120,6 @@ class InstanceNormalization(Layer):
         variance = K.var(inputs, reduction_axes, keepdims=True) + self.epsilon
         stddev = K.sqrt(variance + self.epsilon)
         normed = (inputs - mean) / stddev
-        print("\n\ninputs", inputs.shape, "\n\nmean", mean.shape)
 
         broadcast_shape = [1] * len(input_shape)
         if self.axis is not None:
