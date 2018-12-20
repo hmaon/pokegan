@@ -1,3 +1,4 @@
+import tensorflow as tf
 from tensorflow.keras.layers import Layer, InputSpec
 from tensorflow.keras import initializers, regularizers, constraints
 from tensorflow.keras import backend as K
@@ -115,8 +116,11 @@ class InstanceNormalization(Layer):
         del reduction_axes[0]
 
         mean = K.mean(inputs, reduction_axes, keepdims=True)
-        stddev = K.std(inputs, reduction_axes, keepdims=True) + self.epsilon
+        #stddev = K.std(inputs, reduction_axes, keepdims=True) # XXX this yields nans, the paper has a `+ epsilon` under the square root like so:
+        variance = K.var(inputs, reduction_axes, keepdims=True) + self.epsilon
+        stddev = K.sqrt(variance + self.epsilon)
         normed = (inputs - mean) / stddev
+        print("\n\ninputs", inputs.shape, "\n\nmean", mean.shape)
 
         broadcast_shape = [1] * len(input_shape)
         if self.axis is not None:
@@ -124,10 +128,10 @@ class InstanceNormalization(Layer):
 
         if self.scale:
             broadcast_gamma = K.reshape(self.gamma, broadcast_shape)
-            normed = normed * broadcast_gamma
+            normed = tf.multiply(normed, broadcast_gamma)
         if self.center:
             broadcast_beta = K.reshape(self.beta, broadcast_shape)
-            normed = normed + broadcast_beta
+            normed = tf.math.add(normed, broadcast_beta)
         return normed
 
     def get_config(self):
