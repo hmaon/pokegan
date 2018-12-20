@@ -57,7 +57,7 @@ def InstanceNorm():
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 32,
+tf.app.flags.DEFINE_integer('batch_size', 48,
                             """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string('data_dir', 'dir_per_class',
                            """Path to the data directory.""")
@@ -71,6 +71,8 @@ tf.app.flags.DEFINE_string('gen', None,
                            """Generator weights to load.""")
 tf.app.flags.DEFINE_string('disc', None,
                            """Discriminator weights to load.""")
+tf.app.flags.DEFINE_string('loss', 'rahinge',
+                           """Loss function: rel | rasgan | rahinge | plain""")
                            
 batch_size = FLAGS.batch_size
                            
@@ -100,8 +102,8 @@ writer = tf.contrib.summary.create_file_writer(save_path)
 #keras.backend.set_floatx('float16')
     
 EPOCHS = 10000
-d_learning_base_rate = 0.001
-g_learning_base_rate = 0.001
+d_learning_base_rate = 0.0005
+g_learning_base_rate = 0.0005
 weight_decay = 1e-6
 
 #METRICS=[keras.metrics.categorical_accuracy]
@@ -556,8 +558,8 @@ def simple_g_block(gtensor, depth=32, stride=1, size=5, upsample=False, deconvol
     #conv = PReLU(alpha_initializer=PRELUINIT)(conv) 
     conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=PRELU_SHARED_AXES)(conv)    
     #conv = ELU()(conv)
-    #conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
-    conv = InstanceNormalization(axis=INSTNORM_AXIS, scale=False)(conv)
+    conv = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)        
+    #conv = InstanceNormalization(axis=INSTNORM_AXIS, scale=False)(conv)
             
     return conv
 
@@ -577,7 +579,7 @@ def Generator():
     g = PReLU(alpha_initializer=PRELUINIT)(g)
 
     g = Reshape(target_shape=(-1,1,1) if data_format == 'channels_first' else (1,1,-1))(g)
-    #g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
+    g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
     #g = InstanceNormalization(axis=INSTNORM_AXIS)(g)
     
     g = simple_g_block(g, 512, 2, 2, padding='valid') # 2x2
@@ -599,8 +601,8 @@ def Generator():
 
     g = Conv2D(32, 5, padding='same', kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
     g = PReLU(alpha_initializer=PRELUINIT, shared_axes=PRELU_SHARED_AXES)(g)
-    #g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)        
-    g = InstanceNormalization(axis=INSTNORM_AXIS, scale=False)(g)
+    g = BatchNormalization(axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)        
+    #g = InstanceNormalization(axis=INSTNORM_AXIS, scale=False)(g)
     
     #print(g.shape)
     g = Conv2D(3, 1, activation='tanh', padding='same', use_bias=True)(g)    
@@ -800,6 +802,16 @@ for epoch in range(start_epoch,EPOCHS+1):
 
             d_class,dx_realness = discrim(x, training=True)
             g_class,df_realness = discrim(gen_x, training=True)               
+
+            if len(replayQueue) > 60 and batch_num % 1 == 0:
+                random.shuffle(replayQueue)
+                gen_r = replayQueue.pop()
+                _,dreplay_realness = discrim(gen_r, training=True)                           
+                df_realness = dreplay_realness
+                # should factor out loss functions into separate function...
+                #d_loss += tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - dreplay_realness)
+                #d_loss *= .5
+                #d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - dreplay_realness)            
             
             #dx_realness = tf.reshape(dx_realness, (batch_size,))
             #df_realness = tf.reshape(df_realness, (batch_size,))
@@ -809,16 +821,23 @@ for epoch in range(start_epoch,EPOCHS+1):
             d_loss_real = tf.losses.sigmoid_cross_entropy(multi_class_labels = tf.ones_like(dx_realness), logits = dx_realness)  # human-readable instrumentation
             d_loss_fake = tf.losses.sigmoid_cross_entropy(multi_class_labels = tf.zeros_like(df_realness), logits = df_realness)
             
-            d_loss = d_loss_real + d_loss_fake
-            
-            #d_loss_A = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), logits = dx_realness - tf.math.reduce_mean(df_realness)) # mean LSGAN
-            #d_loss_B = tf.losses.sigmoid_cross_entropy(tf.zeros_like(df_realness), logits = df_realness - tf.math.reduce_mean(dx_realness))
+            if FLAGS.loss == 'plain':
+                d_loss = d_loss_real + d_loss_fake
+            elif FLAGS.loss == 'rasgan':
+                d_loss_A = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), logits = dx_realness - tf.math.reduce_mean(df_realness)) # mean LSGAN
+                d_loss_B = tf.losses.sigmoid_cross_entropy(tf.zeros_like(df_realness), logits = df_realness - tf.math.reduce_mean(dx_realness))
                             
-            #d_loss = d_loss_A + d_loss_B
-            #d_loss *= .5
-
-            #d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness) * 1.0, logits = dx_realness - df_realness) # plain
-
+                d_loss = d_loss_A + d_loss_B
+                d_loss *= .5
+            elif FLAGS.loss == 'rel':                
+                d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness) * 1.0, logits = dx_realness - df_realness) # simplest relativistic
+            elif FLAGS.loss == 'rahinge':
+                d_loss_A = tf.reduce_mean(tf.nn.relu(1.0 - (dx_realness - tf.reduce_mean(df_realness))))
+                d_loss_B = tf.reduce_mean(tf.nn.relu(1.0 + (df_realness - tf.reduce_mean(dx_realness))))
+                
+                d_loss = d_loss_A + d_loss_B
+                d_loss *= .5
+                
             d_loss_class = -1
             #d_loss_class = tf.losses.softmax_cross_entropy(y * .9, logits = d_class)
             
@@ -826,14 +845,7 @@ for epoch in range(start_epoch,EPOCHS+1):
 
 
             
-            if len(replayQueue) > 60 and batch_num % 1 == 0:
-                random.shuffle(replayQueue)
-                gen_r = replayQueue.pop()
-                _,dreplay_realness = discrim(gen_r, training=True)                           
-                #d_loss += tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - dreplay_realness)
-                #d_loss *= .5
-                d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - dreplay_realness)
-            
+
             d_l2 = tf.add_n(discrim.losses)
             #d_l2 = -1
             #d_loss += d_l2 * .01
@@ -854,14 +866,21 @@ for epoch in range(start_epoch,EPOCHS+1):
 
             #g_loss = tf.losses.hinge_loss(labels=tf.ones_like(g_realness), logits=g_realness) 
             #g_loss = tf.losses.sigmoid_cross_entropy(multi_class_labels = tf.ones_like(g_realness), logits = (g_realness - dx_realness)) + tf.losses.mean_squared_error(tf.ones_like(df_realness), tf.sigmoid(df_realness))
-            #g_loss =  tf.losses.sigmoid_cross_entropy(multi_class_labels = tf.ones_like(df_realness) * .9, logits = df_realness)
-            #g_loss = tf.losses.sigmoid_cross_entropy(tf.zeros_like(dx_realness), logits = dx_realness - tf.math.reduce_mean(df_realness)) + tf.losses.sigmoid_cross_entropy(tf.ones_like(df_realness), logits = df_realness - tf.math.reduce_mean(dx_realness)) # mean LSGAN
-            #g_loss *=  .5
-            #g_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness) * 1.0, logits = df_realness - dx_realness) # plain
-
-            #g_loss += tf.losses.mean_squared_error(tf.ones_like(g_realness), tf.sigmoid(g_realness))
-            #g_loss += tf.losses.sigmoid_cross_entropy(multi_class_labels = all_real_b, logits = df_realness)
-            #g_loss += tf.losses.sigmoid_cross_entropy(multi_class_labels = all_real, logits = g_realness)
+            if FLAGS.loss == 'plain':
+                g_loss =  tf.losses.sigmoid_cross_entropy(multi_class_labels = tf.ones_like(df_realness) * .9, logits = df_realness)
+            elif FLAGS.loss == 'rasgan':
+                g_loss = tf.losses.sigmoid_cross_entropy(tf.zeros_like(dx_realness), logits = dx_realness - tf.math.reduce_mean(df_realness)) 
+                + tf.losses.sigmoid_cross_entropy(tf.ones_like(df_realness), logits = df_realness - tf.math.reduce_mean(dx_realness)) # mean LSGAN
+                g_loss *=  .5
+            elif FLAGS.loss == 'rel':
+                g_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness) * 1.0, logits = df_realness - dx_realness) # simplest relativistic
+            elif FLAGS.loss == 'rahinge':
+                g_loss_A = tf.reduce_mean(tf.nn.relu(1.0 + (dx_realness - tf.reduce_mean(df_realness))))
+                g_loss_B = tf.reduce_mean(tf.nn.relu(1.0 - (df_realness - tf.reduce_mean(dx_realness))))
+                
+                g_loss = g_loss_A + g_loss_B
+                g_loss *= .5
+                
 
             g_loss_class = -1
             #g_loss_class = tf.losses.softmax_cross_entropy(yG * .9, logits = g_class)
