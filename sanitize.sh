@@ -8,6 +8,7 @@ do
 	export o="${o//JPG/png}"
 	export o="${o//jpeg/png}"
 	export o="${o//jpg/png}"
-	convert $i -auto-orient -alpha remove -colorspace RGB -filter Lanczos -resize 128x128 -colorspace sRGB -background white -gravity center -extent 128x128 -normalize $o
+	#convert $i -auto-orient -alpha remove -colorspace RGB -filter Lanczos -resize 128x128 -colorspace sRGB -background white -gravity center -extent 128x128 -normalize $o
+	convert $i -auto-orient -alpha remove -colorspace RGB -filter Lanczos -resize 128x128^ -colorspace sRGB -background white -gravity center -extent 128x128 -normalize $o
 	echo $o
 done
