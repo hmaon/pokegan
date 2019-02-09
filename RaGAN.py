@@ -82,7 +82,7 @@ def InstanceNorm():
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer("batch_size", 18, """Number of images to process in a batch.""")
+tf.app.flags.DEFINE_integer("batch_size", 16, """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string("data_dir", "dir_per_class", """Path to the data directory.""")
 tf.app.flags.DEFINE_boolean("use_fp16", False, """Train the model using fp16? [XXX NOT WORKING]""")
 tf.app.flags.DEFINE_float("gpu_memory_fraction", 0.85, """Fraction of GPU memory to reserve; 1.0 may crash the OS window manager.""")
@@ -91,6 +91,7 @@ tf.app.flags.DEFINE_string("gen", None, """Generator weights to load.""")
 tf.app.flags.DEFINE_string("disc", None, """Discriminator weights to load.""")
 tf.app.flags.DEFINE_string("loss", "raverage", """Loss function: rel | raverage | ralsgan | rahinge [broken?] | plain""")
 tf.app.flags.DEFINE_boolean("add_noise", False, """Add gaussian noise to discriminator input?""")
+tf.app.flags.DEFINE_boolean("latest", False, """Load *-latest.h5 weights""")
 
 batch_size = FLAGS.batch_size
 
@@ -120,7 +121,7 @@ writer = tf.contrib.summary.create_file_writer(save_path)
 # keras.backend.set_floatx('float16')
 
 EPOCHS = 10000
-d_learning_base_rate = 0.0001
+d_learning_base_rate = 0.00008
 g_learning_base_rate = 0.0001
 weight_decay = 1e-4
 
@@ -172,6 +173,10 @@ if FLAGS.gen is not None:
 elif FLAGS.disc == "None":
     load_disc = None
 
+if FLAGS.latest:
+    load_gen = GEN_WEIGHTS.format("latest")
+    load_disc = DISCRIM_WEIGHTS.format("latest")
+
 # for i in range(len(sys.argv)):
 #    if sys.argv[i] ==  '-d':
 #        load_disc = sys.argv[i+1]
@@ -222,13 +227,13 @@ def prepro(inp):
 with tf.device("/cpu:0"):
     ImageDatagen = ImageDataGenerator(
         rescale=1.0 / 127,
-        width_shift_range=0,
-        height_shift_range=0,
+        width_shift_range=5,
+        height_shift_range=5,
         zoom_range=0.0,
         rotation_range=0,
         fill_mode="reflect",
         cval=255,
-        horizontal_flip=False,
+        horizontal_flip=True,
         data_format=data_format,
         preprocessing_function=prepro,
         dtype=dtype
@@ -278,7 +283,7 @@ with tf.device("/cpu:0"):
     # save a grid of images to a file
     def render(all_out, fileidx="0-0"):
         pad = 3
-        swatchdim = 128  # 64x64 is the output of the generator
+        swatchdim = 128  # NxN image outputs from G
         swatches = 8  # per side
         dim = (pad + swatchdim) * swatches
         img = PIL.Image.new("RGB", (dim, dim), "white")
@@ -388,7 +393,8 @@ def res_d_block(dtensor, depth, stride=2, stridedPadding="same", extra=1, bn=Tru
 
 def Discriminator():
     dense_dropout = 0.25
-    depth = 8
+    depth = 32
+    maxdepth = 512    
 
     inp = Input(channels_shape, dtype=dtype)
     # print("discrim input shape:", inp.shape)
@@ -397,27 +403,12 @@ def Discriminator():
 
     # d = simple_d_block(d, depth, stride = 1, size = 7, bn = True) # 128x128
 
-    d = Conv2D(depth * 2, 3, 1, padding="same", use_bias=False, kernel_initializer=INIT, kernel_regularizer=K_REG, dtype=dtype)(d)
+    d = Conv2D(depth, 5, 1, padding="same", use_bias=False, kernel_initializer=INIT, kernel_regularizer=K_REG, dtype=dtype)(d)
     
-    d = res_d_block(d, depth * 2, stride=1, size=3, bn=True, extra=0)  # 128x128
-    d = res_d_block(d, depth * 2, bn=True, extra=0)  # 64x64
-
-    d = res_d_block(d, depth * 4, stride=1, size=3, bn=True, extra=0)  # 64x64
-    d = res_d_block(d, depth * 4, bn=True, extra=0)  # 32x32
-
-    d = res_d_block(d, depth * 8, stride=1, size=3, bn=True, extra=0)  # 32x32
-    d = res_d_block(d, depth * 8, bn=True, extra=0)  # 16x16
-
-    d = res_d_block(d, depth * 16, stride=1, size=3, bn=True, extra=0)  # 16x16
-    d = res_d_block(d, depth * 16, bn=True, extra=0)  # 8x8
-
-    # d = res_d_block(d, depth * 32, stride=1, size=3, bn=True, extra=0)  # 8x8
-    d = res_d_block(d, depth * 32, bn=True, extra=2)  # 4x4
-
-    # d = res_d_block(d, depth * 64, stride=1, size=3, bn=True, extra=1)  # 4x4
-    # d = res_d_block(d, depth * 64, bn=True, extra=0)  # 2x2
-
-    # d = res_d_block(d, depth * 32, 2, size=2, extra=1)  # 1x1
+    for i in range(5):
+        depth = min(depth * 2, maxdepth)
+        d = res_d_block(d, depth, stride=1, size=5, bn=True, extra=0)
+        d = res_d_block(d, depth, bn=True, extra=0)
 
     # d = SWISH(trainable_beta = True, shared_axes = PRELU_SHARED_AXES)(d) # for res blocks
     d = LeakyReLU(alpha=0.2)(d)
@@ -425,15 +416,11 @@ def Discriminator():
 
     d = Flatten()(d)
 
-    # d = Concatenate()([d, a])
-
-    # e = d
-
-    d = Dense(128, kernel_initializer="lecun_normal", kernel_regularizer=K_REG, use_bias=False, name="dense_filler0")(d)
+    # d = Dense(128, kernel_initializer="lecun_normal", kernel_regularizer=K_REG, use_bias=False, name="dense_filler0")(d)
     # e = LeakyReLU(alpha = 0.1)(e)
-    d = Activation('selu')(d)
+    # d = Activation('selu')(d)
     # d = SWISH(trainable_beta=True, shared_axes=(1,))(d)
-    d = AlphaDropout(dense_dropout, dtype=dtype)(d)
+    # d = AlphaDropout(dense_dropout, dtype=dtype)(d)
 
     d = Dense(128, kernel_initializer="lecun_normal", kernel_regularizer=K_REG, use_bias=False, name="dense_filler1")(d)
     # e = LeakyReLU(alpha = 0.1)(e)
@@ -607,10 +594,12 @@ def simple_g_block(gtensor, depth=32, stride=2, size=4, upsample=False, deconvol
         conv = Conv2DTranspose(depth, size, padding="same", strides=stride, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(conv)
 
     # conv = SWISH(shared_axes=PRELU_SHARED_AXES)(conv)
-    conv = ReLU()(conv)    
+    # conv = ReLU()(conv)    
+    conv = LeakyReLU(alpha=0.01)(conv)    
+    # conv = PReLU(alpha_initializer=PRELUINIT, shared_axes=PRELU_SHARED_AXES)(conv)    
     if bn:
         conv = BatchNormalization(trainable=True, axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(conv)    
-    # conv = PReLU(alpha_initializer = PRELUINIT, shared_axes = PRELU_SHARED_AXES)(conv)
+
     # conv = ELU()(conv)
     # conv = InstanceNormalization(axis = INSTNORM_AXIS, scale = False)(conv)
 
@@ -627,11 +616,12 @@ def Generator():
 
     g = xz
 
-    g = Dense(2048 * 2 * 2, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=True, dtype=dtype)(g)
-    g = Activation('selu')(g)
+    g = Dense(1024 * 2 * 2, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=True, dtype=dtype)(g)
+    # g = Activation('selu')(g)
     # g = ReLU()(g)
+    g = LeakyReLU(alpha=0.01)(g)
     # g = SWISH(shared_axes=(1,))(g)
-    # g = PReLU(alpha_initializer = PRELUINIT)(g)
+    # g = PReLU(alpha_initializer=PRELUINIT, shared_axes=(1,))(g)
     # g = AlphaDropout(0.25)(g)
     # g = BatchNormalization(scale = BNSCALE, trainable = True, renorm = RENORM, scale = True, beta_constraint = g_batchnorm_constraint, gamma_constraint = g_batchnorm_constraint)(g)
 
@@ -641,31 +631,31 @@ def Generator():
     # g = AlphaDropout(0.25)(g)
     # g = BatchNormalization(scale = BNSCALE, trainable = True, renorm = RENORM, scale = True, beta_constraint = g_batchnorm_constraint, gamma_constraint = g_batchnorm_constraint)(g)
 
-    h = g = Reshape(target_shape=(2048, 2, 2) if data_format == "channels_first" else (2, 2, 2048))(g)
+    h = g = Reshape(target_shape=(1024, 2, 2) if data_format == "channels_first" else (2, 2, 1024))(g)
     # g = BatchNormalization(scale = BNSCALE, trainable = True, axis = BATCH2D_AXIS, renorm = RENORM, scale = BNSCALE, beta_constraint = g_batchnorm_constraint, gamma_constraint = g_batchnorm_constraint)(g)
     # g = InstanceNormalization(axis = INSTNORM_AXIS)(g)
 
     # g = simple_g_block(g, 512, size = 4, stride = 4, padding = 'valid', upsample = False, deconvolve = True) # 2x2
     # g = Conv2DTranspose(512, 4, padding="valid", strides=4, kernel_initializer=INIT, kernel_regularizer=K_REG, use_bias=False, dtype=dtype)(g)
 
-    g = simple_g_block(g, 2048, stride=2)  # 4x4
+    g = simple_g_block(g, 1024, stride=2)  # 4x4
 
     print("4x4 shape? ", g.shape)
 
-    g = simple_g_block(g, 1024, stride=2)  # 8x8
+    g = simple_g_block(g, 512, stride=2)  # 8x8
 
-    g = simple_g_block(g, 512, stride=2)  # 16x16
+    g = simple_g_block(g, 256, stride=2)  # 16x16
 
-    g = simple_g_block(g, 256, stride=2)  # 32x32
+    g = simple_g_block(g, 128, stride=2)  # 32x32
 
-    g = simple_g_block(g, 128, stride=2)  # 64x64
+    g = simple_g_block(g, 64, stride=2)  # 64x64
 
-    g = simple_g_block(g, 64, stride=2)  # 128x128
+    g = simple_g_block(g, 32, stride=2)  # 128x128
 
     # g = Conv2D(24, 3, padding = 'same', kernel_initializer = INIT, kernel_regularizer = K_REG, use_bias = False, dtype = dtype)(g)
-    g = BatchNormalization(trainable=True, axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
-    # g = PReLU(alpha_initializer = PRELUINIT, shared_axes = PRELU_SHARED_AXES)(g)
-    g = ReLU()(g)
+    # g = BatchNormalization(trainable=True, axis=BATCH2D_AXIS, renorm=RENORM, scale=BNSCALE, beta_constraint=g_batchnorm_constraint, gamma_constraint=g_batchnorm_constraint)(g)
+    # g = PReLU(alpha_initializer=PRELUINIT, shared_axes=PRELU_SHARED_AXES)(g)
+    # g = ReLU()(g)
     # g = SWISH(shared_axes=PRELU_SHARED_AXES)(g)
 
     print(g.shape)
@@ -695,11 +685,7 @@ def gen_input(_class=None, clipping=0.95):
     # noise = np.random.uniform(-clipping, clipping, NOISE)
     noise = np.random.normal(loc=0, scale=1, size=NOISE)
     noise = (noise % clipping) * (np.abs(noise) / noise)
-    # nois2 = np.random.normal(loc = 0, scale = 1, size = NOIS2)
-    # nois2 = (nois2 % clipping) * (np.abs(nois2) / nois2)
-    # nois2[0] = .5
-    # nois2[1] = -.5
-    nois2 = np.array([0.5, -0.5])
+    nois2 = np.array([1.0, -1.0])
 
     if isinstance(_class, type(None)):
         _class = keras.utils.to_categorical(random.randint(0, num_classes - 2), num_classes=num_classes)
@@ -722,70 +708,24 @@ def gen_input_batch(classes=None, clipping=1):
     print("!!! Generating random batch in gen_input_batch()!")
     return tf.convert_to_tensor(np.array([gen_input_rand(clipping) for x in range(batch_size)], dtype=npdtype), dtype=dtype)
 
+SAVED_INPUTS=[]
 
 def sample(fileidx="0-0"):
     all_out = []
-    classes = [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        12,
-        13,
-        14,
-        15,
-        16,
-        17,
-        18,
-        19,
-        20,
-        21,
-        22,
-        23,
-        24,
-        25,
-        26,
-        27,
-        28,
-        29,
-        30,
-        31,
-        32,
-        33,
-        34,
-        35,
-        36,
-        37,
-        38,
-        39,
-        40,
-        41,
-        42,
-        43,
-        44,
-        45,
-        46,
-        47,
-        48,
-        49,
-    ]  # , 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
+    classes = [0, 1, 2, 3, 4, 5, ]  # , 128, 129, 130, 131, 132, 133, 134, 135, 136, 119, 101, 93, 142, num_classes-1, 143]
     # print("[sample()] num classes: ", len(classes))
     _classidx = 0
     for i in range(4):
-        class_one_hot = [keras.utils.to_categorical(classes[x % len(classes)] % num_classes, num_classes=num_classes) for x in range(_classidx, _classidx + 10)]
-        class_one_hot = class_one_hot + [
-            (keras.utils.to_categorical(classes[(x + _classidx) % len(classes)] % num_classes, num_classes=num_classes) * ((x + 1) / 10.0) + keras.utils.to_categorical((x + 1 + _classidx) % num_classes, num_classes=num_classes) * ((10 - x) / 10.0))
-            for x in range(0, 10)
-        ]
-        inp = gen_input_batch(class_one_hot, clipping=0.5 * (i + 2))
+        if i >= len(SAVED_INPUTS):
+            class_one_hot = [keras.utils.to_categorical(x % num_classes, num_classes=num_classes) for x in range(_classidx, _classidx + 10)]
+            class_one_hot = class_one_hot + [
+                (keras.utils.to_categorical((x + _classidx) % num_classes, num_classes=num_classes) * ((x + 1) / 10.0) +
+                 keras.utils.to_categorical((x + 1 + _classidx) % num_classes, num_classes=num_classes) * ((10 - x) / 10.0))
+                for x in range(0, 10)
+            ]
+            inp = gen_input_batch(class_one_hot, clipping=0.5 * (i + 2))
+            SAVED_INPUTS.append(inp)
+        inp = SAVED_INPUTS[i]
         _classidx += 20
         print(inp.shape)
         batch_out = gen.predict(inp)
@@ -961,7 +901,7 @@ for epoch in range(start_epoch, EPOCHS + 1):
             # d_loss_class = tf.losses.softmax_cross_entropy(y * .9, logits = d_class) # leads to extreme collapse, all logits going negative, weird
             d_loss_class = tf.losses.hinge_loss(labels=y, logits=d_class) + tf.losses.hinge_loss(labels=tf.zeros_like(y), logits=g_class)
 
-            d_loss = d_loss_class * 0.5 + d_loss * 0.5
+            d_loss = d_loss_class * 0.4 + d_loss * 0.6
 
             if len(replayQueue) > 60 and batch_num % 1 == 0:
                 random.shuffle(replayQueue)
@@ -1016,7 +956,7 @@ for epoch in range(start_epoch, EPOCHS + 1):
 
             g_loss_nonrel = tf.losses.sigmoid_cross_entropy(multi_class_labels=tf.ones_like(df_realness), logits=df_realness)  # for human-readable instrumentation
 
-            g_loss = g_loss * .1 + g_loss_class * .9
+            g_loss = g_loss * .5 + g_loss_class * .5
             # g_loss = g_loss_class
 
             g_l2 = tf.add_n(gen.losses)
@@ -1119,18 +1059,21 @@ for epoch in range(start_epoch, EPOCHS + 1):
     #    with tf.contrib.summary.always_record_summaries():
     #        for w in discrim.weights: tf.contrib.summary.histogram(w.name, w)
 
-    if epoch > 200:
+    be = batches * epoch
+    if be > 20000:
         # d_learning_rate.assign(0.0001 + random.random() * 0.0005)
         # g_learning_rate.assign(0.0001 + random.random() * 0.0005)
-        d_learning_rate.assign(d_learning_base_rate * (0.9999 ** (epoch - 200)))
-        g_learning_rate.assign(g_learning_base_rate * (0.9999 ** (epoch - 200)))
+        d_learning_rate.assign(d_learning_base_rate * (0.99998 ** (be - 20000)))
+        g_learning_rate.assign(g_learning_base_rate * (0.99998 ** (be - 20000)))
         print("d_learning_rate = {}, g_learning_rate = {}".format(d_learning_rate.numpy(), g_learning_rate.numpy()))
 
     # gaussian_rate.assign(base_gaussian_noise * (0.997 ** epoch))
+    '''
     with writer.as_default():
         with tf.contrib.summary.always_record_summaries():
             tf.contrib.summary.histogram("d_grads?", gradients_of_discriminator[0])
             tf.contrib.summary.histogram("g_grads?", gradients_of_generator[0])
+    '''
 
     if epoch % SAVE_INTERVAL == 0:
         # tag = tags[int(epoch/(float(SAVE_INTERVAL))) % len(tags)]
