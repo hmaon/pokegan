@@ -82,7 +82,7 @@ def InstanceNorm():
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer("batch_size", 16, """Number of images to process in a batch.""")
+tf.app.flags.DEFINE_integer("batch_size", 18, """Number of images to process in a batch.""")
 tf.app.flags.DEFINE_string("data_dir", "dir_per_class", """Path to the data directory.""")
 tf.app.flags.DEFINE_boolean("use_fp16", False, """Train the model using fp16? [XXX NOT WORKING]""")
 tf.app.flags.DEFINE_float("gpu_memory_fraction", 0.85, """Fraction of GPU memory to reserve; 1.0 may crash the OS window manager.""")
@@ -90,7 +90,7 @@ tf.app.flags.DEFINE_integer("epoch", 1, """Epoch number of last checkpoint for c
 tf.app.flags.DEFINE_string("gen", None, """Generator weights to load.""")
 tf.app.flags.DEFINE_string("disc", None, """Discriminator weights to load.""")
 tf.app.flags.DEFINE_string("loss", "raverage", """Loss function: rel | raverage | ralsgan | rahinge [broken?] | plain""")
-tf.app.flags.DEFINE_boolean("add_noise", False, """Add gaussian noise to discriminator input?""")
+tf.app.flags.DEFINE_boolean("add_noise", True, """Add gaussian noise to discriminator input?""")
 tf.app.flags.DEFINE_boolean("latest", False, """Load *-latest.h5 weights""")
 
 batch_size = FLAGS.batch_size
@@ -208,8 +208,8 @@ def hack_load(model, fileName):
 
 
 def get_input_noise_scale(epoch):
-    scale = 0.2 * (0.999 ** (epoch + 100))  # effect of this is delayed due to queue but oh well; the constant here (100) is the length of the queue
-    scale = max(scale, 2.5 / 256)
+    scale = 0.1 * (0.999 ** (epoch + 100))  # effect of this is delayed due to queue but oh well; the constant here (100) is the length of the queue
+    scale = max(scale, 1.01 / 256)
     return scale
 
 
@@ -227,13 +227,13 @@ def prepro(inp):
 with tf.device("/cpu:0"):
     ImageDatagen = ImageDataGenerator(
         rescale=1.0 / 127,
-        width_shift_range=5,
-        height_shift_range=5,
+        width_shift_range=0,
+        height_shift_range=0,
         zoom_range=0.0,
         rotation_range=0,
         fill_mode="reflect",
         cval=255,
-        horizontal_flip=True,
+        horizontal_flip=False,
         data_format=data_format,
         preprocessing_function=prepro,
         dtype=dtype
@@ -256,7 +256,10 @@ with tf.device("/cpu:0"):
             while True:
                 while self.q.full():
                     time.sleep(0.05)
-                self.q.put(self.datagen.next())
+                try:
+                    self.q.put(self.datagen.next())
+                except Exception as e:
+                    print("Exception in, presumably, ImageDataGenerator next(), please check dataset", e)
 
     def next_batch():
         while flowQueue.empty():
@@ -416,11 +419,11 @@ def Discriminator():
 
     d = Flatten()(d)
 
-    # d = Dense(128, kernel_initializer="lecun_normal", kernel_regularizer=K_REG, use_bias=False, name="dense_filler0")(d)
+    d = Dense(128, kernel_initializer="lecun_normal", kernel_regularizer=K_REG, use_bias=False, name="dense_filler0")(d)
     # e = LeakyReLU(alpha = 0.1)(e)
-    # d = Activation('selu')(d)
+    d = Activation('selu')(d)
     # d = SWISH(trainable_beta=True, shared_axes=(1,))(d)
-    # d = AlphaDropout(dense_dropout, dtype=dtype)(d)
+    d = AlphaDropout(dense_dropout, dtype=dtype)(d)
 
     d = Dense(128, kernel_initializer="lecun_normal", kernel_regularizer=K_REG, use_bias=False, name="dense_filler1")(d)
     # e = LeakyReLU(alpha = 0.1)(e)
@@ -607,7 +610,7 @@ def simple_g_block(gtensor, depth=32, stride=2, size=4, upsample=False, deconvol
 
 
 NOIS2 = 2
-NOISE = 256 - (NOIS2 * num_classes)
+NOISE = 512 - (NOIS2 * num_classes)
 input_length = num_classes * NOIS2 + NOISE
 
 
@@ -684,7 +687,7 @@ gen.call = tf.contrib.eager.defun(gen.call)
 def gen_input(_class=None, clipping=0.95):
     # noise = np.random.uniform(-clipping, clipping, NOISE)
     noise = np.random.normal(loc=0, scale=1, size=NOISE)
-    noise = (noise % clipping) * (np.abs(noise) / noise)
+    noise = (noise % clipping)  # * (np.abs(noise) / noise)  # abs(n)/n' retains sign but maybe we don't want negatives?
     nois2 = np.array([1.0, -1.0])
 
     if isinstance(_class, type(None)):
@@ -727,9 +730,9 @@ def sample(fileidx="0-0"):
             SAVED_INPUTS.append(inp)
         inp = SAVED_INPUTS[i]
         _classidx += 20
-        print(inp.shape)
+        print("inp.shape = ", inp.shape)
         batch_out = gen.predict(inp)
-        print(batch_out.shape)
+        print("batch_out.shape = ", batch_out.shape)
         for out in batch_out:
             all_out.append(out)
     render(all_out, fileidx)
@@ -861,8 +864,8 @@ for epoch in range(start_epoch, EPOCHS + 1):
             x_gen_input = gen_input_batch(y)
             gen_x = gen(x_gen_input, training=True)
 
-            # if batch_num % 3 ==  0:
-            #    replayQueue.insert(0, gen_x.numpy())
+            if batch_num % 3 == 0:
+                replayQueue.insert(0, gen_x.numpy())
 
             if FLAGS.add_noise:
                 gen_x += np.random.normal(scale=input_noise_scale, size=gen_x.shape)
@@ -900,18 +903,24 @@ for epoch in range(start_epoch, EPOCHS + 1):
             # d_loss_class = tf.losses.sigmoid_cross_entropy(y, logits = d_class) + tf.losses.sigmoid_cross_entropy(tf.zeros_like(y), logits = g_class)
             # d_loss_class = tf.losses.softmax_cross_entropy(y * .9, logits = d_class) # leads to extreme collapse, all logits going negative, weird
             d_loss_class = tf.losses.hinge_loss(labels=y, logits=d_class) + tf.losses.hinge_loss(labels=tf.zeros_like(y), logits=g_class)
-
-            d_loss = d_loss_class * 0.4 + d_loss * 0.6
+            # d_loss_class = tf.losses.hinge_loss(labels=y, logits=d_class-g_class)  # seems bogus
 
             if len(replayQueue) > 60 and batch_num % 1 == 0:
                 random.shuffle(replayQueue)
                 gen_r = replayQueue.pop()
-                _, dreplay_realness = discrim(gen_r, training=True)
-                # df_realness = dreplay_realness
+                _, dfr_realness = discrim(gen_r, training=True)
                 # should factor out loss functions into separate function...
-                d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - dreplay_realness)
+                d_loss_A = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), logits=dx_realness - tf.math.reduce_mean(dfr_realness))
+                d_loss_B = tf.losses.sigmoid_cross_entropy(tf.zeros_like(dfr_realness), logits=dfr_realness - tf.math.reduce_mean(dx_realness))
+
+                d_loss = d_loss * .5 + (d_loss_A + d_loss_B) * .25
+
+                # d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - dreplay_realness)
                 # d_loss *=  .5
                 # d_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(dx_realness), dx_realness - dreplay_realness)
+
+            if num_classes > 1:
+                d_loss = d_loss_class * 0.4 + d_loss * 0.6
 
             d_l2 = tf.add_n(discrim.losses)
             # d_l2 = -1
@@ -953,10 +962,12 @@ for epoch in range(start_epoch, EPOCHS + 1):
             # g_loss_class = tf.losses.sigmoid_cross_entropy(y, logits = g_class) # don't know if this works either
             # g_loss_class = tf.losses.softmax_cross_entropy(y * .9, logits = g_class)
             g_loss_class = tf.losses.hinge_loss(labels=y, logits=g_class)  # don't know if this works either
+            # g_loss_class = tf.losses.hinge_loss(labels=y, logits=g_class-d_class)  # ppbbbffbft
 
             g_loss_nonrel = tf.losses.sigmoid_cross_entropy(multi_class_labels=tf.ones_like(df_realness), logits=df_realness)  # for human-readable instrumentation
 
-            g_loss = g_loss * .5 + g_loss_class * .5
+            if num_classes > 1:
+                g_loss = g_loss * .5 + g_loss_class * .5
             # g_loss = g_loss_class
 
             g_l2 = tf.add_n(gen.losses)
@@ -1006,17 +1017,21 @@ for epoch in range(start_epoch, EPOCHS + 1):
 
         # print(discrim.variables)
 
-        scale = 128.0
-        gradients_of_discriminator = dtape.gradient(d_loss, discrim.variables)
-        # gradients_of_discriminator = [(grad / scale if grad !=  None else None) for grad in gradients_of_discriminator]
-        apply_discrim_gradients(gradients_of_discriminator, discrim)
+        try:
+            scale = 128.0
+            gradients_of_discriminator = dtape.gradient(d_loss, discrim.variables)
+            # gradients_of_discriminator = [(grad / scale if grad !=  None else None) for grad in gradients_of_discriminator]
+            apply_discrim_gradients(gradients_of_discriminator, discrim)
 
-        gradients_of_generator = gtape.gradient(g_loss, gen.variables)
-        apply_gen_gradients(gradients_of_generator, gen)
+            gradients_of_generator = gtape.gradient(g_loss, gen.variables)
+            apply_gen_gradients(gradients_of_generator, gen)
 
-        end = timer()
-        batches_timed += 1
-        total_time += end - start
+            end = timer()
+            batches_timed += 1
+            total_time += end - start
+        except Exception as e:
+            print("Gradient-related exception:")
+            print(e)
 
         # d_loss_real = tf.reduce_mean(d_loss_real)
         # d_loss_fake = tf.reduce_mean(d_loss_fake)
